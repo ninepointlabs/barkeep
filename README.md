@@ -42,6 +42,15 @@ The installer copies the plugin to `~/.config/omarchy/plugins/ninepointlabs.bark
 enables it in the running shell, links a `barkeep` command into `~/.local/bin`,
 and adds a "Barkeep" entry to the app launcher.
 
+Omarchy's own plugin command works too:
+
+```bash
+omarchy plugin add https://github.com/ninepointlabs/barkeep.git --enable
+```
+
+That gives you the overlay and the keybinding below; the `barkeep` command
+and the launcher entry come only from `install.sh`.
+
 ### Bind a key
 
 Add one line to `~/.config/hypr/bindings.lua` (Hyprland reloads on save):
