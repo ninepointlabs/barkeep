@@ -1,0 +1,244 @@
+#!/bin/bash
+
+# barkeep-ops — shell-side helper for the Barkeep overlay.
+#
+#   barkeep-ops inspect [--no-fetch]   JSON: git state of every plugin folder
+#   barkeep-ops update <dir>...        fast-forward plugin folders, then bring Barkeep back
+#   barkeep-ops update-all             every git-managed plugin folder
+#   barkeep-ops remove <dir>           remove one plugin folder, then bring Barkeep back
+#
+# Update and remove are run detached from the overlay: both make the shell
+# rescan its plugins, which tears down every open overlay, Barkeep included.
+# This script survives that, does the work through the stock `omarchy plugin`
+# commands, and summons Barkeep again with a status line once the shell has
+# settled. <dir> is the folder name under ~/.config/omarchy/plugins.
+
+set -uo pipefail
+
+PLUGINS_DIR="$HOME/.config/omarchy/plugins"
+SELF_ID="ninepointlabs.barkeep"
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes}"
+
+# Plugin folders are third-party checkouts. A repo's own .git/config can name
+# commands git would run for us (fsmonitor, hooks, upload-pack for local
+# remotes, credential helpers); override those on every call so inspecting a
+# hand-installed folder never executes anything from it.
+GIT_SAFE=(
+  -c core.fsmonitor=false
+  -c core.hooksPath=/dev/null
+  -c core.pager=cat
+  -c credential.helper=
+  -c protocol.ext.allow=never
+  -c remote.origin.uploadpack=git-upload-pack
+  -c remote.origin.receivepack=git-receive-pack
+)
+git_safe() {
+  git "${GIT_SAFE[@]}" "$@"
+}
+# The stock `omarchy plugin update` runs plain git (fetch, diff, merge) in the
+# same folder; hand it the same overrides through the environment git reads
+# for exactly this purpose.
+git_config_env() {
+  local out="" i
+  for (( i = 1; i < ${#GIT_SAFE[@]}; i += 2 )); do
+    out+="'${GIT_SAFE[$i]}' "
+  done
+  printf '%s' "${out% }"
+}
+export GIT_CONFIG_PARAMETERS="$(git_config_env)"
+
+valid_dir_name() {
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $1 != *..* ]]
+}
+
+# --------------------------------------------------------------------- inspect
+
+inspect_one() {
+  local dir="$1" do_fetch="$2"
+  local name="${dir##*/}"
+  local id symlink=false target="" is_git=false remote="" head="" dirty=false
+  local fetched=false fetch_error="" behind=0 ahead=0 incoming="[]"
+
+  id=$(jq -r '.id // ""' "$dir/manifest.json" 2>/dev/null || true)
+  if [[ -L $dir ]]; then
+    symlink=true
+    target=$(readlink -f "$dir" 2>/dev/null || true)
+  fi
+
+  if [[ -d $dir/.git ]]; then
+    is_git=true
+    remote=$(git_safe -C "$dir" remote get-url origin 2>/dev/null || true)
+    head=$(git_safe -C "$dir" rev-parse --short HEAD 2>/dev/null || true)
+    if [[ -n $(git_safe -C "$dir" status --porcelain --untracked-files=no 2>/dev/null) ]]; then
+      dirty=true
+    fi
+    if [[ $do_fetch == 1 && -n $remote ]]; then
+      local err
+      if err=$(timeout 20 git "${GIT_SAFE[@]}" -C "$dir" fetch --quiet origin HEAD 2>&1); then
+        fetched=true
+      else
+        fetch_error=$(printf '%s' "$err" | tail -n 1)
+        [[ -n $fetch_error ]] || fetch_error="fetch timed out"
+      fi
+    fi
+    if git_safe -C "$dir" rev-parse -q --verify FETCH_HEAD >/dev/null 2>&1; then
+      # A previous fetch counts as a check, even if this run did not fetch.
+      [[ $do_fetch == 1 && $fetched == false ]] || fetched=true
+      behind=$(git_safe -C "$dir" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo 0)
+      ahead=$(git_safe -C "$dir" rev-list --count FETCH_HEAD..HEAD 2>/dev/null || echo 0)
+      incoming=$(git_safe -C "$dir" log --format=%s HEAD..FETCH_HEAD 2>/dev/null | head -n 12 | jq -R . | jq -sc .)
+      [[ -n $incoming ]] || incoming="[]"
+    fi
+  fi
+
+  jq -cn \
+    --arg dir "$dir" \
+    --arg name "$name" \
+    --arg id "$id" \
+    --argjson symlink "$symlink" \
+    --arg target "$target" \
+    --argjson git "$is_git" \
+    --arg remote "$remote" \
+    --arg head "$head" \
+    --argjson dirty "$dirty" \
+    --argjson fetched "$fetched" \
+    --arg fetchError "$fetch_error" \
+    --argjson behind "${behind:-0}" \
+    --argjson ahead "${ahead:-0}" \
+    --argjson incoming "$incoming" \
+    '{dir: $dir, name: $name, id: $id, symlink: $symlink, target: $target, git: $git,
+      remote: $remote, head: $head, dirty: $dirty, fetched: $fetched, fetchError: $fetchError,
+      behind: $behind, ahead: $ahead, incoming: $incoming}'
+}
+
+cmd_inspect() {
+  local do_fetch=1
+  [[ ${1:-} == "--no-fetch" ]] && do_fetch=0
+  local items=()
+  if [[ -d $PLUGINS_DIR ]]; then
+    for dir in "$PLUGINS_DIR"/*/; do
+      dir="${dir%/}"
+      [[ ${dir##*/} == .* ]] && continue
+      [[ -f $dir/manifest.json ]] || continue
+      items+=("$(inspect_one "$dir" "$do_fetch")")
+    done
+  fi
+  if (( ${#items[@]} == 0 )); then
+    echo "[]"
+  else
+    printf '%s\n' "${items[@]}" | jq -sc .
+  fi
+}
+
+# --------------------------------------------------------------------- resummon
+
+# The shell rescans (and rebuilds every overlay) right after an update or a
+# removal, and the folder watcher may trigger a second rescan a moment later.
+# Wait for that to settle, then summon Barkeep until it reports itself open.
+resummon() {
+  local payload="$1" status="$2"
+  sleep 1.5
+  for _ in 1 2 3 4 5 6 7 8; do
+    omarchy-shell -q shell summon "$SELF_ID" "$payload" >/dev/null 2>&1
+    sleep 0.8
+    if [[ $(omarchy-shell shell call "$SELF_ID" isOpen "" 2>/dev/null) == "true" ]]; then
+      return 0
+    fi
+  done
+  # Barkeep did not come back (disabled, or the shell is restarting): the
+  # outcome still has to reach the user somehow.
+  omarchy-notification-send "Barkeep" "$status" >/dev/null 2>&1 || true
+  return 1
+}
+
+manifest_id() {
+  jq -r '.id // ""' "$PLUGINS_DIR/$1/manifest.json" 2>/dev/null || true
+}
+
+status_payload() {
+  local status="$1" urgent="$2" select="$3"
+  jq -cn --arg status "$status" --argjson urgent "$urgent" --arg select "$select" \
+    '{status: $status, urgent: $urgent, select: $select}'
+}
+
+last_line() {
+  printf '%s' "$1" | grep -v '^\s*$' | tail -n 1
+}
+
+# ---------------------------------------------------------------------- update
+
+update_dirs() {
+  local select=""
+  (( $# == 1 )) && select=$(manifest_id "$1")
+  local ok=() failed=() out
+  for name in "$@"; do
+    valid_dir_name "$name" || { failed+=("$name: invalid folder name"); continue; }
+    [[ -d $PLUGINS_DIR/$name/.git ]] || { failed+=("$name: not a git checkout"); continue; }
+    if out=$(omarchy-plugin-update "$name" --yes 2>&1); then
+      ok+=("$(last_line "$out")")
+    else
+      failed+=("$name: $(last_line "$out")")
+    fi
+  done
+  local status urgent=false
+  if (( ${#failed[@]} > 0 )); then
+    urgent=true
+    status="Update failed — ${failed[*]}"
+    (( ${#ok[@]} == 0 )) || status="$status · ${ok[*]}"
+  elif (( ${#ok[@]} == 0 )); then
+    status="Nothing to update."
+  else
+    status="${ok[*]}"
+  fi
+  resummon "$(status_payload "$status" "$urgent" "$select")" "$status"
+}
+
+cmd_update() {
+  (( $# > 0 )) || { echo "barkeep-ops: update needs at least one plugin folder" >&2; exit 1; }
+  update_dirs "$@"
+}
+
+cmd_update_all() {
+  local names=()
+  for dir in "$PLUGINS_DIR"/*/; do
+    dir="${dir%/}"
+    [[ ${dir##*/} == .* ]] && continue
+    [[ -d $dir/.git ]] || continue
+    names+=("${dir##*/}")
+  done
+  if (( ${#names[@]} == 0 )); then
+    resummon "$(status_payload "No git-managed plugins to update." false "")" "No git-managed plugins to update."
+    return
+  fi
+  update_dirs "${names[@]}"
+}
+
+# ---------------------------------------------------------------------- remove
+
+cmd_remove() {
+  local name="${1:-}"
+  [[ -n $name ]] || { echo "barkeep-ops: remove needs a plugin folder" >&2; exit 1; }
+  valid_dir_name "$name" || { echo "barkeep-ops: invalid folder name '$name'" >&2; exit 1; }
+  local out status urgent=false
+  if out=$(omarchy-plugin-remove "$name" --yes 2>&1); then
+    status="$(last_line "$out")"
+  else
+    urgent=true
+    status="Remove failed — $(last_line "$out")"
+  fi
+  resummon "$(status_payload "$status" "$urgent" "")" "$status"
+}
+
+# -------------------------------------------------------------------- dispatch
+
+case "${1:-}" in
+  inspect) shift; cmd_inspect "$@" ;;
+  update) shift; cmd_update "$@" ;;
+  update-all) shift; cmd_update_all "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  *)
+    sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

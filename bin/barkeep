@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# barkeep — summon the Barkeep overlay in the running Omarchy shell.
+#
+#   barkeep            toggle the overlay (default)
+#   barkeep show       open it
+#   barkeep hide       close it
+#   barkeep status     print "open" or "closed"
+#   barkeep check      print git update state for every plugin folder (JSON)
+
+set -euo pipefail
+
+SELF_ID="ninepointlabs.barkeep"
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+if ! omarchy-shell shell ping >/dev/null 2>&1; then
+  echo "barkeep: omarchy-shell is not running" >&2
+  exit 1
+fi
+
+case "${1:-toggle}" in
+  toggle) omarchy-shell shell toggle "$SELF_ID" '{}' ;;
+  show | open) omarchy-shell shell summon "$SELF_ID" '{}' >/dev/null ;;
+  hide | close) omarchy-shell shell hide "$SELF_ID" ;;
+  status)
+    if [[ $(omarchy-shell shell call "$SELF_ID" isOpen "" 2>/dev/null) == "true" ]]; then
+      echo open
+    else
+      echo closed
+    fi
+    ;;
+  check) "$HERE/barkeep-ops" inspect ;;
+  -h | --help | help) sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)
+    echo "barkeep: unknown command '$1'" >&2
+    exit 1
+    ;;
+esac

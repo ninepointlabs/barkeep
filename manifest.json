@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "ninepointlabs.barkeep",
+  "name": "Barkeep",
+  "version": "0.1.0",
+  "author": "Nine Point Labs",
+  "license": "MIT",
+  "description": "Keyboard-driven overlay that tends your Omarchy bar: see every installed shell plugin, switch it on or off, slide it along the bar, pin it to the center, pull updates and remove what you no longer pour.",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": false,
+  "entryPoints": {
+    "overlay": "Barkeep.qml"
+  }
+}
