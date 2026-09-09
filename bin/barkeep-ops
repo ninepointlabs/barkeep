@@ -2,10 +2,19 @@
 
 # barkeep-ops — shell-side helper for the Barkeep overlay.
 #
+#   barkeep-ops catalog                JSON: every installed manifest + shell.json
+#   barkeep-ops mutate <op> <id> [...] enable|disable|use-bar|move|pin|unpin
 #   barkeep-ops inspect [--no-fetch]   JSON: git state of every plugin folder
 #   barkeep-ops update <dir>...        fast-forward plugin folders, then bring Barkeep back
 #   barkeep-ops update-all             every git-managed plugin folder
 #   barkeep-ops remove <dir>           remove one plugin folder, then bring Barkeep back
+#
+# Since Omarchy 4.0.3 a third-party plugin no longer receives the shell's
+# plugin registry or config; it gets a facade scoped to itself. So `catalog`
+# rebuilds the same picture from disk (the same scan the shell's own
+# PluginRegistry runs, plus ~/.config/omarchy/shell.json), and `mutate` goes
+# through the stock `omarchy plugin` / `omarchy bar` commands, which write
+# shell.json atomically and tell the shell to reload it.
 #
 # Update and remove are run detached from the overlay: both make the shell
 # rescan its plugins, which tears down every open overlay, Barkeep included.
@@ -16,6 +25,9 @@
 set -uo pipefail
 
 PLUGINS_DIR="$HOME/.config/omarchy/plugins"
+FIRST_PARTY_DIR="${OMARCHY_PATH:-/usr/share/omarchy}/shell/plugins"
+SHELL_CONFIG="$HOME/.config/omarchy/shell.json"
+SHELL_DEFAULTS="${OMARCHY_PATH:-/usr/share/omarchy}/config/omarchy/shell.json"
 SELF_ID="ninepointlabs.barkeep"
 export GIT_TERMINAL_PROMPT=0
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes}"
@@ -131,6 +143,89 @@ cmd_inspect() {
   fi
 }
 
+# --------------------------------------------------------------------- catalog
+
+# Same walk the shell's PluginRegistry.rescan() does: first-party manifests
+# may sit one level deeper (panels/clock) and a bar source may carry sibling
+# widgets/*.manifest.json; third-party plugins are top-level folders only.
+# Output: {"plugins": {id: manifest+__sourceDir+__isFirstParty}, "config": shell.json}
+emit_manifest() {
+  local kind="$1" manifest="$2" sub
+  if [[ ${manifest##*/} == "manifest.json" ]]; then sub="${manifest%/manifest.json}"; else sub="$(dirname -- "$manifest")"; fi
+  jq -c --arg dir "$sub" --argjson fp "$([[ $kind == firstparty ]] && echo true || echo false)" \
+    'select(type == "object" and (.id | type) == "string" and .id != "")
+     | . + {__sourceDir: $dir, __isFirstParty: $fp}' "$manifest" 2>/dev/null || true
+}
+
+cmd_catalog() {
+  local first=() third=()
+  if [[ -d $FIRST_PARTY_DIR ]]; then
+    while IFS= read -r m; do first+=("$(emit_manifest firstparty "$m")"); done \
+      < <(find "$FIRST_PARTY_DIR" -mindepth 2 -maxdepth 3 -type f \( -name manifest.json -o -name '*.manifest.json' \) | sort)
+  fi
+  if [[ -d $PLUGINS_DIR ]]; then
+    for sub in "$PLUGINS_DIR"/*/; do
+      sub="${sub%/}"
+      [[ -f $sub/manifest.json ]] || continue
+      third+=("$(emit_manifest thirdparty "$sub/manifest.json")")
+    done
+  fi
+  local config_file="$SHELL_DEFAULTS"
+  [[ -s $SHELL_CONFIG ]] && config_file="$SHELL_CONFIG"
+  # First-party ids win, and "omarchy." is reserved, exactly as the shell merges.
+  {
+    printf '%s\n' "${first[@]}" "${third[@]}" | grep -v '^$' | jq -sc '
+      (map(select(.__isFirstParty)) | map({(.id): .}) | add // {}) as $fp
+      | (map(select(.__isFirstParty | not) | select(($fp[.id] // null) == null and (.id | startswith("omarchy.") | not))) | map({(.id): .}) | add // {}) as $tp
+      | $fp + $tp'
+    jq -c '.' "$config_file" 2>/dev/null || echo '{}'
+  } | jq -sc '{plugins: .[0], config: .[1]}'
+}
+
+# ---------------------------------------------------------------------- mutate
+
+# Every change goes through the stock CLI so shell.json is written atomically
+# and the shell reloads it. Prints one status line; exit status is the CLI's.
+cmd_mutate() {
+  local op="${1:-}" id="${2:-}"; shift 2 2>/dev/null || true
+  [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "invalid plugin id"; return 1; }
+  local out
+  case "$op" in
+    enable)   out=$(omarchy-plugin-enable "$id" "$@" 2>&1) ;;
+    disable)  out=$(omarchy-plugin-disable "$id" 2>&1) ;;
+    use-bar)  out=$(omarchy-bar use "$id" 2>&1) ;;
+    move)     out=$(omarchy-bar move "$id" "$@" 2>&1) ;;
+    pin)
+      # Only pull the widget into the center section if it is elsewhere;
+      # pinning a widget already in center must not change its order.
+      if ! jq -e --arg id "$id" 'any(.bar.layout.center[]?; (if type == "object" then .id else . end) == $id)' \
+           "$([[ -s $SHELL_CONFIG ]] && echo "$SHELL_CONFIG" || echo "$SHELL_DEFAULTS")" >/dev/null 2>&1; then
+        out=$(omarchy-bar move "$id" --section center --index 9999 2>&1) || { last_line "$out"; echo; return 1; }
+      fi
+      out=$(set_center_anchor "$id" 2>&1) ;;
+    unpin)    out=$(set_center_anchor "" 2>&1) ;;
+    *) echo "unknown op '$op'"; return 1 ;;
+  esac
+  local rc=$?
+  last_line "${out:-ok}"; echo
+  return $rc
+}
+
+# The stock CLI has no center-anchor command, so this uses the same shared
+# helper omarchy-bar itself sources: one jq program, atomic replace, then a
+# shell reloadConfig. Runs in a subshell because the helper installs an EXIT trap.
+set_center_anchor() {
+  (
+    source omarchy-shell-config || exit 1
+    if [[ -z $1 ]]; then
+      commit "$NORMALIZE | del(.bar.centerAnchor)"
+    else
+      commit "$NORMALIZE | .bar.centerAnchor = \$id" --arg id "$1"
+    fi
+    echo "center anchor ${1:-cleared}"
+  )
+}
+
 # --------------------------------------------------------------------- resummon
 
 # The shell rescans (and rebuilds every overlay) right after an update or a
@@ -233,6 +328,8 @@ cmd_remove() {
 # -------------------------------------------------------------------- dispatch
 
 case "${1:-}" in
+  catalog) shift; cmd_catalog "$@" ;;
+  mutate) shift; cmd_mutate "$@" ;;
   inspect) shift; cmd_inspect "$@" ;;
   update) shift; cmd_update "$@" ;;
   update-all) shift; cmd_update_all "$@" ;;

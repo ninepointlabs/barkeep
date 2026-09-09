@@ -24,9 +24,9 @@ of five commands to type. Barkeep puts it all in one place:
 - **Remove.** Delete a third-party plugin, after a confirmation.
 - **Open.** Jump straight into a plugin's own panel or popup.
 
-Every change lands in `~/.config/omarchy/shell.json` through the shell's own
-plugin registry, so the bar updates instantly and nothing else touches your
-config.
+Every change lands in `~/.config/omarchy/shell.json` through the stock
+`omarchy plugin` and `omarchy bar` commands, so the bar updates instantly and
+nothing else touches your config.
 
 It is not a bar button. Barkeep is an overlay you bring up when you need it.
 
@@ -140,16 +140,23 @@ barkeep check      JSON git state for every plugin folder
 
 ## How it works
 
-- `Barkeep.qml` is an `overlay` plugin loaded by `omarchy-shell`. It reads the
-  shell's live plugin registry and config, and calls the same registry
-  functions `omarchy bar move` and `omarchy plugin enable` reach over IPC.
-  Nothing is written anywhere except `shell.json`, and only through the shell.
-- `bin/barkeep-ops` is a small bash helper. `inspect` reports git state for
-  every plugin folder. `update` and `remove` run the stock
-  `omarchy plugin update --yes` and `omarchy plugin remove --yes`, then bring
-  Barkeep back with the outcome in its status line. They run detached because
-  the shell rescans its plugins afterwards, which rebuilds every open overlay,
-  Barkeep included.
+- `Barkeep.qml` is an `overlay` plugin loaded by `omarchy-shell`. Since
+  Omarchy 4.0.3 a third-party plugin no longer receives the shell's plugin
+  registry or config (it gets a facade scoped to itself), so Barkeep asks
+  `bin/barkeep-ops catalog` for the picture instead: the same manifest scan
+  the shell's own `PluginRegistry` runs over `$OMARCHY_PATH/shell/plugins`
+  and `~/.config/omarchy/plugins`, plus `shell.json`. It refreshes on every
+  open and after every change.
+- Changes go through `bin/barkeep-ops mutate`, which wraps the stock
+  `omarchy plugin enable|disable` and `omarchy bar use|move` commands (and
+  the shared `omarchy-shell-config` helper for the center anchor). Those
+  write `shell.json` atomically and ask the shell to reload it. Nothing is
+  written anywhere except `shell.json`, and only through Omarchy's own tools.
+- `inspect` reports git state for every plugin folder. `update` and `remove`
+  run the stock `omarchy plugin update --yes` and `omarchy plugin remove
+  --yes`, then bring Barkeep back with the outcome in its status line. They
+  run detached because the shell rescans its plugins afterwards, which
+  rebuilds every open overlay, Barkeep included.
 - `BarkeepModel.js` holds the pure model code: grouping, filtering, the bar
   strip, and the action set for each plugin.
 

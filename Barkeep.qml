@@ -94,6 +94,7 @@ Item {
     root.confirmOpen = false
     root.pendingConfirm = null
     root.rebuild()
+    root.refreshCatalog()
     if (Date.now() - Model.state.inspectedAt > root.inspectMaxAgeMs || payload.recheck === true) root.checkUpdates()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -132,25 +133,49 @@ Item {
   // changes (say, Barkeep just switched an overlay off). The rebuilt instance
   // is still marked open in the shell, but nobody calls open() on it — so if
   // that is our situation, reopen ourselves where the user left off.
+  // Since Omarchy 4.0.3 the facade only answers isPluginOpen() for our own id.
   onShellChanged: {
     if (!root.shell) return
     Qt.callLater(function() {
       if (root.opened || !root.shell) return
-      var openIds = root.shell.openPanelIds
-      if (openIds && openIds[root.selfId] === true) root.open("{}")
+      if (typeof root.shell.isPluginOpen === "function" && root.shell.isPluginOpen(root.selfId) === true)
+        root.open("{}")
     })
-  }
-
-  Connections {
-    target: root.pluginRegistry
-    function onPluginsChanged() { if (root.opened) root.rebuild() }
   }
 
   // ---------------------------------------------------------------- model
 
+  // Omarchy 4.0.3 stopped handing third-party plugins the shell's plugin
+  // registry and config (each now gets a facade scoped to itself). Barkeep
+  // needs the whole picture, so barkeep-ops rebuilds it from disk with the
+  // same scan the shell runs, plus shell.json. Snapshot lives here; rebuild()
+  // is pure over it. Refreshed on every open and after each change.
+  property var catalogPlugins: ({})
+  property var catalogConfig: ({})
+  property bool catalogLoaded: false
+
+  function refreshCatalog() {
+    if (catalogProcess.running) { root.catalogDirty = true; return }
+    catalogProcess.running = true
+  }
+  property bool catalogDirty: false
+
+  function applyCatalog(text) {
+    var parsed = null
+    try { parsed = JSON.parse(text || "") } catch (e) { parsed = null }
+    if (!parsed || !Util.isPlainObject(parsed.plugins)) {
+      root.say("Could not read the plugin catalog (barkeep-ops catalog).", true)
+      return
+    }
+    root.catalogPlugins = parsed.plugins
+    root.catalogConfig = Util.isPlainObject(parsed.config) ? parsed.config : ({})
+    root.catalogLoaded = true
+    if (root.opened) root.rebuild()
+  }
+
   function rebuild() {
-    var plugins = root.pluginRegistry ? root.pluginRegistry.installedPlugins : ({})
-    var config = root.shell ? root.shell.shellConfig : ({})
+    var plugins = root.catalogPlugins
+    var config = root.catalogConfig
     var keepId = root.current ? root.current.id : Model.state.lastSelectedId
 
     root.rows = Model.buildRows(plugins, config, Model.state.inspect, root.filterText, root.selfId)
@@ -261,22 +286,55 @@ Item {
     }
   }
 
+  // Every change goes out through `barkeep-ops mutate`, which wraps the stock
+  // `omarchy plugin` / `omarchy bar` commands: they write shell.json
+  // atomically and ask the shell to reload it, so the bar updates live and
+  // the next catalog read sees the new state. One at a time; the CLI itself
+  // serialises on shell.json.
+  property var mutateQueue: []
+  property string mutateOkText: ""
+  property string mutateFailText: ""
+
+  function mutate(args, okText, failText) {
+    root.mutateQueue = root.mutateQueue.concat([{ args: args, ok: okText, fail: failText }])
+    root.pumpMutate()
+  }
+
+  function pumpMutate() {
+    if (mutateProcess.running || root.mutateQueue.length === 0) return
+    var job = root.mutateQueue[0]
+    root.mutateQueue = root.mutateQueue.slice(1)
+    root.mutateOkText = job.ok
+    root.mutateFailText = job.fail
+    mutateProcess.command = [root.opsPath, "mutate"].concat(job.args)
+    mutateProcess.running = true
+  }
+
+  function finishMutate(exitCode, text) {
+    var line = String(text || "").trim().split("\n").pop() || ""
+    if (exitCode === 0) root.say(root.mutateOkText, false)
+    else root.say((root.mutateFailText ? root.mutateFailText + " " : "") + (line || ("barkeep-ops exited " + exitCode)), true)
+    root.refreshCatalog()
+    root.pumpMutate()
+  }
+
   function toggleEnabled(row) {
-    if (!root.pluginRegistry) return
     if (row.custom) { root.say("Custom modules are declared in shell.json; edit them there.", false); return }
     if (row.isSelf) { root.say("Barkeep cannot switch itself off from inside. Run: omarchy plugin disable " + root.selfId, false); return }
     if (row.isBarOption) {
       if (row.active) { root.say("A bar has no off switch; pick another bar option to replace it.", false); return }
-      if (root.pluginRegistry.setEnabled(row.id, true)) root.say("Now using " + row.name + " as the bar.", false)
-      else root.say(root.pluginRegistry.lastEnableError || "Could not switch bars.", true)
+      root.mutate(["use-bar", row.id], "Now using " + row.name + " as the bar.", "Could not switch bars.")
       return
     }
     var turnOn = row.isBarWidget ? !row.onBar : !row.enabled
-    if (root.pluginRegistry.setEnabled(row.id, turnOn)) {
-      if (row.isBarWidget) root.say(turnOn ? row.name + " is on the bar." : row.name + " is off the bar; its component stays available.", false)
-      else root.say((turnOn ? "Enabled " : "Disabled ") + row.name + ".", false)
+    if (turnOn) {
+      root.mutate(["enable", row.id],
+        row.isBarWidget ? row.name + " is on the bar." : "Enabled " + row.name + ".",
+        "Could not enable " + row.name + ".")
     } else {
-      root.say(root.pluginRegistry.lastEnableError || "Could not change " + row.name + ".", true)
+      root.mutate(["disable", row.id],
+        row.isBarWidget ? row.name + " is off the bar; its component stays available." : "Disabled " + row.name + ".",
+        "Could not disable " + row.name + ".")
     }
   }
 
@@ -291,57 +349,43 @@ Item {
   // moving right lands at its start, so the widget stays next to its old
   // neighbours instead of jumping across the screen.
   function moveToSection(row, target) {
-    if (!root.pluginRegistry) return
     if (!row.onBar) { root.say("Put " + row.name + " on the bar first (Enter).", false); return }
     if (row.section === target) return
     var movingLeft = root.sections.indexOf(target) < root.sections.indexOf(row.section)
-    var error = root.pluginRegistry.moveBarWidget(row.id, { section: target, index: movingLeft ? 9999 : 0 })
-    if (error) root.say(error, true)
-    else root.say("Moved " + row.name + " to the " + target + " section.", false)
+    root.mutate(["move", row.id, "--section", target, "--index", String(movingLeft ? 9999 : 0)],
+      "Moved " + row.name + " to the " + target + " section.", "Could not move " + row.name + ".")
   }
 
   function reorder(row, direction) {
-    if (!root.pluginRegistry) return
     if (!row.onBar) { root.say("Put " + row.name + " on the bar first (Enter).", false); return }
     var index = row.index + direction
     if (index < 0 || index >= row.count) return
-    var error = root.pluginRegistry.moveBarWidget(row.id, { section: row.section, index: index })
-    if (error) root.say(error, true)
-    else root.say(row.name + " is now " + (index + 1) + " of " + row.count + " in the " + row.section + " section.", false)
+    root.mutate(["move", row.id, "--section", row.section, "--index", String(index)],
+      row.name + " is now " + (index + 1) + " of " + row.count + " in the " + row.section + " section.",
+      "Could not move " + row.name + ".")
   }
 
   // "Fixed position": the bar's centerAnchor pins one center widget to the
   // exact middle of the screen and flanks the rest around it.
   function togglePin(row) {
-    if (!root.shell || !root.pluginRegistry) return
     if (row.custom && !row.onBar) return
     if (!row.onBar) { root.say("Put " + row.name + " on the bar first (Enter).", false); return }
     if (row.pinned) {
-      root.shell.mutateShellConfig(function(config) {
-        if (!Util.isPlainObject(config.bar)) config.bar = {}
-        config.bar.centerAnchor = ""
-      })
-      root.say(row.name + " unpinned; the center section is centered as a group again.", false)
+      root.mutate(["unpin", row.id], row.name + " unpinned; the center section is centered as a group again.", "Could not unpin " + row.name + ".")
       return
     }
-    if (row.section !== "center") {
-      var error = root.pluginRegistry.moveBarWidget(row.id, { section: "center", index: 9999 })
-      if (error) { root.say(error, true); return }
-    }
-    root.shell.mutateShellConfig(function(config) {
-      if (!Util.isPlainObject(config.bar)) config.bar = {}
-      config.bar.centerAnchor = row.id
-    })
-    root.say(row.name + " is pinned to the exact center of the bar.", false)
+    root.mutate(["pin", row.id], row.name + " is pinned to the exact center of the bar.", "Could not pin " + row.name + ".")
   }
 
+  // The facade only summons plugins Barkeep owns, so opening another
+  // plugin's panel goes through the shell CLI, which is not scoped.
   function openPlugin(row) {
-    if (!root.shell || !row.canOpen) return
+    if (!row.canOpen) return
     if (!(row.enabled || row.onBar)) { root.say("Enable " + row.name + " first (Enter).", false); return }
     var id = row.id
     root.opened = false
-    root.shell.summon(id, "{}")
-    root.shell.hide(root.selfId)
+    if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.selfId)
+    Quickshell.execDetached(["omarchy-shell", "shell", "summon", id, "{}"])
   }
 
   function dirName(row) {
@@ -422,10 +466,12 @@ Item {
       var row = request.row
       // The stock remove command looks the plugin up by folder name; when the
       // folder is not named after the id, it would leave the shell.json entry
-      // behind. Switch it off through the registry first so the config is clean.
-      if (root.pluginRegistry && row && (row.enabled || row.onBar) && !row.isBarOption)
-        root.pluginRegistry.setEnabled(row.id, false)
-      Quickshell.execDetached([root.opsPath, "remove", request.names[0]])
+      // behind. Switch it off through the CLI first so the config is clean.
+      // Detached, since the removal that follows tears this overlay down.
+      if (row && (row.enabled || row.onBar) && !row.isBarOption)
+        Quickshell.execDetached(["bash", "-c", "\"$0\" mutate disable \"$1\" >/dev/null 2>&1; exec \"$0\" remove \"$2\"", root.opsPath, row.id, request.names[0]])
+      else
+        Quickshell.execDetached([root.opsPath, "remove", request.names[0]])
       root.dismiss()
     }
   }
@@ -449,6 +495,35 @@ Item {
   // ------------------------------------------------------------ processes
 
   ListModel { id: displayModel }
+
+  Process {
+    id: catalogProcess
+    command: [root.opsPath, "catalog"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyCatalog(text)
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.say("Could not read the plugin catalog (barkeep-ops exited " + exitCode + ").", true)
+      // A refresh asked for while this one ran: go again so the newest state wins.
+      if (root.catalogDirty) { root.catalogDirty = false; catalogProcess.running = true }
+    }
+  }
+
+  Process {
+    id: mutateProcess
+    command: []
+    property string collected: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: mutateProcess.collected = text
+    }
+    onExited: function(exitCode) {
+      var text = mutateProcess.collected
+      mutateProcess.collected = ""
+      root.finishMutate(exitCode, text)
+    }
+  }
 
   Process {
     id: inspectProcess
