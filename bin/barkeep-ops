@@ -64,6 +64,40 @@ valid_dir_name() {
   [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $1 != *..* ]]
 }
 
+RUN_UID="$(id -u)"
+
+# Update and remove hand a folder name to the stock `omarchy plugin` commands,
+# which then git-merge inside that folder or delete it outright. So only ever
+# name a real directory sitting directly in PLUGINS_DIR and owned by us: a
+# symlinked plugin folder (or a symlinked path to the plugins directory) would
+# aim those commands at a checkout or a tree that is none of our business.
+owned_by_us() {
+  [[ $(stat -c '%u' -- "$1" 2>/dev/null) == "$RUN_UID" ]]
+}
+
+plugins_dir_ok() {
+  local cur="$HOME" comp
+  [[ -n ${HOME:-} && -d $HOME ]] || return 1
+  for comp in .config omarchy plugins; do
+    cur="$cur/$comp"
+    [[ ! -L $cur && -d $cur ]] || return 1
+    owned_by_us "$cur" || return 1
+  done
+  return 0
+}
+
+# Prints why the folder must not be touched and fails; silent and succeeds when
+# the folder is a plugin directory we may act on.
+plugin_dir_problem() {
+  local name="$1" dir="$PLUGINS_DIR/$1"
+  valid_dir_name "$name" || { echo "invalid folder name"; return 1; }
+  plugins_dir_ok || { echo "$PLUGINS_DIR is not a plain directory owned by you"; return 1; }
+  [[ ! -L $dir ]] || { echo "plugin folder is a symlink"; return 1; }
+  [[ -d $dir ]] || { echo "no such plugin folder"; return 1; }
+  owned_by_us "$dir" || { echo "plugin folder is owned by another user"; return 1; }
+  return 0
+}
+
 # --------------------------------------------------------------------- inspect
 
 inspect_one() {
@@ -267,9 +301,10 @@ update_dirs() {
   local select=""
   (( $# == 1 )) && select=$(manifest_id "$1")
   local ok=() failed=() out
+  local reason
   for name in "$@"; do
-    valid_dir_name "$name" || { failed+=("$name: invalid folder name"); continue; }
-    [[ -d $PLUGINS_DIR/$name/.git ]] || { failed+=("$name: not a git checkout"); continue; }
+    reason=$(plugin_dir_problem "$name") || { failed+=("$name: $reason"); continue; }
+    [[ -d $PLUGINS_DIR/$name/.git && ! -L $PLUGINS_DIR/$name/.git ]] || { failed+=("$name: not a git checkout"); continue; }
     if out=$(omarchy-plugin-update "$name" --yes 2>&1); then
       ok+=("$(last_line "$out")")
     else
@@ -299,7 +334,10 @@ cmd_update_all() {
   for dir in "$PLUGINS_DIR"/*/; do
     dir="${dir%/}"
     [[ ${dir##*/} == .* ]] && continue
-    [[ -d $dir/.git ]] || continue
+    # A linked-in or foreign-owned folder is not ours to fast-forward; leave it
+    # out of the sweep rather than report it as a failure the user did not ask for.
+    plugin_dir_problem "${dir##*/}" >/dev/null || continue
+    [[ -d $dir/.git && ! -L $dir/.git ]] || continue
     names+=("${dir##*/}")
   done
   if (( ${#names[@]} == 0 )); then
@@ -314,7 +352,11 @@ cmd_update_all() {
 cmd_remove() {
   local name="${1:-}"
   [[ -n $name ]] || { echo "barkeep-ops: remove needs a plugin folder" >&2; exit 1; }
-  valid_dir_name "$name" || { echo "barkeep-ops: invalid folder name '$name'" >&2; exit 1; }
+  local reason
+  reason=$(plugin_dir_problem "$name") || {
+    echo "barkeep-ops: refusing to remove '$name': $reason" >&2
+    exit 1
+  }
   local out status urgent=false
   if out=$(omarchy-plugin-remove "$name" --yes 2>&1); then
     status="$(last_line "$out")"
