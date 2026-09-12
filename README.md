@@ -186,7 +186,20 @@ Everything is already on a stock Omarchy install: `omarchy-shell` (Quickshell),
   git error output) is rendered as plain text.
 - The helper accepts plugin folder names only (`[A-Za-z0-9][A-Za-z0-9._-]*`,
   no `..`), passes them as arguments rather than through a shell, and builds
-  all JSON with `jq`.
+  all JSON with `jq`. Before it hands a folder to the stock update or remove
+  command it checks that the folder is a real directory sitting directly in
+  `~/.config/omarchy/plugins` and owned by you; a symlinked plugin folder is
+  refused rather than followed into someone else's checkout.
+- `install.sh` writes exactly three paths (the plugin folder, the
+  `barkeep.desktop` entry, the `~/.local/bin/barkeep` symlink) and validates
+  each one before touching it: it walks the path component by component and
+  stops if a component is a symlink or is owned by another user, and it
+  replaces only a plugin folder carrying Barkeep's own manifest and an app
+  entry it wrote itself. The plugin folder is staged in a sibling temp
+  directory and renamed into place, and the app entry is written to a temp
+  file and renamed over the old one, so nothing live is truncated. The same
+  checks gate `--uninstall`, which leaves anything that is not Barkeep's
+  alone. `tests/install_test.sh` covers both the install and the refusals.
 - The IPC surface (`omarchy-shell shell call ninepointlabs.barkeep …`) is the
   same one every shell plugin has; anything that can reach your shell socket
   can already rearrange the bar. The `renderTo` development helper only writes
@@ -197,6 +210,16 @@ Everything is already on a stock Omarchy install: `omarchy-shell` (Quickshell),
 Edit in this repo, run `./install.sh`, then `omarchy restart shell` (the
 shell's hot reload keeps the old component cached for overlays). Do not
 restart the shell while the session is locked.
+
+`tests/install_test.sh` exercises the installer against a throwaway `HOME`
+with a stub `omarchy-shell`, covering a normal install, a re-install, an
+uninstall and the cases it has to refuse (symlinked destinations, foreign
+`.desktop` entries and plugin folders, foreign-owned paths). It touches
+nothing outside its temp directories:
+
+```bash
+tests/install_test.sh
+```
 
 Any public function is reachable while the overlay is open, which is how the
 layout actions are tested headlessly:
