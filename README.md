@@ -23,12 +23,18 @@ of five commands to type. Barkeep puts it all in one place:
   lists them before you pull, one plugin at a time or all at once.
 - **Remove.** Delete a third-party plugin, after a confirmation.
 - **Open.** Jump straight into a plugin's own panel or popup.
+- **Keep bar profiles.** Save the bar as a named profile (Work, Video
+  editing, Gaming…) and switch between them from a chip on the bar, the
+  overlay or a key binding. Each profile decides which widgets are on the bar
+  and where; the plugins you are not using in one stay installed and
+  configured, ready for the next.
 
 Every change lands in `~/.config/omarchy/shell.json` through the stock
 `omarchy plugin` and `omarchy bar` commands, so the bar updates instantly and
 nothing else touches your config.
 
-It is not a bar button. Barkeep is an overlay you bring up when you need it.
+Barkeep is an overlay you bring up when you need it, plus one optional chip
+on the bar: the profile switcher.
 
 ## Install
 
@@ -40,7 +46,9 @@ cd ~/Projects/barkeep
 
 The installer copies the plugin to `~/.config/omarchy/plugins/ninepointlabs.barkeep`,
 enables it in the running shell, links a `barkeep` command into `~/.local/bin`,
-and adds a "Barkeep" entry to the app launcher.
+and adds a "Barkeep" entry to the app launcher. Run from a terminal, it asks
+whether to put the profile switcher on the bar; `barkeep chip on` and
+`barkeep chip off` change that later.
 
 Omarchy's own plugin command works too:
 
@@ -48,8 +56,9 @@ Omarchy's own plugin command works too:
 omarchy plugin add https://github.com/ninepointlabs/barkeep.git --enable
 ```
 
-That gives you the overlay and the keybinding below; the `barkeep` command
-and the launcher entry come only from `install.sh`.
+That gives you the overlay, the profile switcher on the bar and the
+keybinding below; the `barkeep` command and the launcher entry come only from
+`install.sh`.
 
 ### Bind a key
 
@@ -78,8 +87,9 @@ That puts it under Setup › Plugins › Barkeep.
 cd ~/Projects/barkeep && ./install.sh --uninstall
 ```
 
-This disables the plugin, deletes the runtime copy, and removes the `barkeep`
-link and the launcher entry. Remove the keybinding and menu lines by hand if
+This disables the plugin (the overlay and the switcher chip), deletes the
+runtime copy, and removes the `barkeep` link and the launcher entry. Your
+profiles in `~/.config/omarchy/barkeep/` are left in place. Remove the keybinding and menu lines by hand if
 you added them. Or, from inside Omarchy: `omarchy plugin remove ninepointlabs.barkeep`.
 
 ## Using it
@@ -113,10 +123,75 @@ Updates and removals always ask first.
 
 ![The confirmation shown before an update is pulled](preview3.png)
 
+### Bar profiles
+
+There are more plugins than bar. A profile is one arrangement of the bar:
+which widgets sit in the left, center and right sections, in what order, and
+which one is pinned to the center. Keep a Work profile with mail and calendar,
+a Video editing one with your audio and capture widgets, a Gaming one with
+almost nothing, and switch between them in one click.
+
+The first time Barkeep sees the bar it saves it as **Default**, so nothing
+is lost. From there:
+
+- **Make a profile.** Arrange the bar the way you want it, then choose
+  "Save the current bar as…" on the switcher (or `Ctrl+N` in Barkeep's
+  Profiles view, or `barkeep profile save "Video editing"`). The new profile
+  is the one in use.
+- **Switch.** Click the switcher chip and pick one, scroll over the chip, press
+  `Enter` on a profile in the Profiles view, or run `barkeep profile use work`
+  / `barkeep profile next`.
+- **Change one.** Switch to it and arrange the bar as usual: in Barkeep, by
+  dragging on the bar, or with `omarchy bar`. The profile in use is saved when
+  you switch away from it, so there is nothing to remember to save.
+- **Tidy up.** Rename (`F2`), change the icon (`Ctrl+I` cycles through a set),
+  duplicate (`Ctrl+D`) or delete (`Delete`, asks first) in the Profiles view.
+
+![The profile switcher open from the bar](preview5.png)
+
+![Barkeep's Profiles view: profiles on the left, the selected profile's bar in the strip on top](preview4.png)
+
+What a switch keeps and changes:
+
+- **Widget settings are shared.** A widget you can have only one of (theme
+  rotate, a mail widget, the weather) keeps one set of settings across every
+  profile: change its folders in Work and Video editing has the same folders.
+  Widgets you can have several of (clocks, indicator groups) keep their own
+  settings per profile, since each instance is part of the arrangement.
+- **Background services keep running.** Some plugins are a bar widget and a
+  service (mail sync, file sync, calendars). Omarchy switches a third-party
+  plugin off when it disappears from `shell.json`, so when a profile leaves
+  one of these off the bar, Barkeep keeps it listed under `plugins` and the
+  service keeps working. Only the icon goes.
+- **The switcher stays put.** If the switcher chip is on the bar, it stays
+  in its place in every profile, even one saved without it.
+- **Missing plugins are skipped.** A profile that names a plugin you have
+  since removed switches without it, lists it in the Profiles view, and puts
+  it back if you reinstall it.
+- **Only the bar layout and the center pin change.** Bar position,
+  transparency and which bar is in use are the same in every profile.
+
+Switching rewrites the bar layout, and Omarchy rebuilds the bar's widgets
+when that happens: exactly what moving one widget with Barkeep or
+`omarchy bar move` does.
+
+To switch from the keyboard, bind the commands in
+`~/.config/hypr/bindings.lua`, for example:
+
+```lua
+o.bind("SUPER + ALT + B", "Bar profiles", "omarchy-shell ninepointlabs.barkeep-switcher toggle")
+o.bind("SUPER + ALT + N", "Next bar profile", "barkeep profile next")
+```
+
+Check `omarchy menu keybindings --print` for clashes first.
+
 ### Keys
+
+In the Plugins view:
 
 | Key | Does |
 |-----|------|
+| Tab | switch to the Profiles view |
 | ↑ / ↓ | pick a plugin |
 | Enter | on/off · put on / take off the bar · use this bar |
 | ← / → | nudge the widget along the bar within its section |
@@ -129,14 +204,43 @@ Updates and removals always ask first.
 | type | filter |
 | Esc | clear the filter, then close |
 
+In the Profiles view:
+
+| Key | Does |
+|-----|------|
+| Tab | back to the Plugins view |
+| ↑ / ↓ | pick a profile |
+| Enter | put the profile on the bar |
+| Ctrl+N | save the current bar as a new profile |
+| F2 / Ctrl+E | rename |
+| Ctrl+I | next icon |
+| Ctrl+D | duplicate |
+| Delete | delete (asks first; not the profile in use) |
+| Esc | cancel a name being typed, then close |
+
 ### Command line
 
 ```
-barkeep            toggle the overlay
+barkeep                         toggle the overlay
 barkeep show|hide
-barkeep status     open / closed
-barkeep check      JSON git state for every plugin folder
+barkeep profiles                open the overlay on the Profiles view
+barkeep status                  open / closed
+barkeep check                   JSON git state for every plugin folder
+barkeep chip on|off             put the profile switcher on the bar, or take it off
+
+barkeep profile list            * marks the profile in use
+barkeep profile use <profile>   by key or by name
+barkeep profile next|prev
+barkeep profile save <name> [--icon <glyph>]
+barkeep profile rename <profile> <name>
+barkeep profile icon <profile> <glyph>
+barkeep profile duplicate <profile> <name>
+barkeep profile delete <profile>
+barkeep profile status          the whole store, as JSON
 ```
+
+The `barkeep profile` commands work on files and do not need the overlay
+open.
 
 ## How it works
 
@@ -158,14 +262,27 @@ barkeep check      JSON git state for every plugin folder
   run detached because the shell rescans its plugins afterwards, which
   rebuilds every open overlay, Barkeep included.
 - `BarkeepModel.js` holds the pure model code: grouping, filtering, the bar
-  strip, and the action set for each plugin.
+  strip, the action set for each plugin, and reading the profile store.
+- `Switcher.qml` is Barkeep's `bar-widget`: the profile chip and its popup.
+  Barkeep's overlay is enabled by its own `plugins` entry in `shell.json` and
+  the chip is a separate bar layout entry, so the chip can come and go without
+  touching the overlay.
+- `bin/barkeep-profiles` owns `~/.config/omarchy/barkeep/profiles.json`: an
+  ordered list of profiles (key, name, icon, layout, center pin), the profile
+  in use, and the shared settings of single-instance widgets. A switch saves
+  the live bar into the profile in use, builds the target layout (shared
+  settings in, uninstalled plugins out, switcher kept, services kept alive),
+  and writes it with the same one-program `commit` from
+  `omarchy-shell-config` that `omarchy bar` uses, which replaces `shell.json`
+  atomically and reloads the shell. The overlay and the chip read the store
+  directly and watch it, so a switch made anywhere shows up everywhere.
 
 Barkeep runs no plugin code itself and never touches `/usr/share/omarchy`.
 
 ### Dependencies
 
 Everything is already on a stock Omarchy install: `omarchy-shell` (Quickshell),
-`git`, `jq`, `rsync`, `timeout` from coreutils.
+`git`, `jq`, `rsync`, `timeout` from coreutils, `flock` from util-linux.
 
 ## Security notes
 
@@ -200,8 +317,15 @@ Everything is already on a stock Omarchy install: `omarchy-shell` (Quickshell),
   file and renamed over the old one, so nothing live is truncated. The same
   checks gate `--uninstall`, which leaves anything that is not Barkeep's
   alone. `tests/install_test.sh` covers both the install and the refusals.
-- The IPC surface (`omarchy-shell shell call ninepointlabs.barkeep …`) is the
-  same one every shell plugin has; anything that can reach your shell socket
+- `barkeep-profiles` writes only `~/.config/omarchy/barkeep/profiles.json`
+  (mode 600, via a temp file and a rename) and `shell.json` through Omarchy's
+  own helper. It refuses a store directory or file that is a symlink or not
+  yours, refuses to overwrite a store it cannot parse, and takes a lock so two
+  switches cannot interleave. Profile names and icons are rendered as plain
+  text.
+- The IPC surface (`omarchy-shell shell call ninepointlabs.barkeep …`, and
+  `omarchy-shell ninepointlabs.barkeep-switcher toggle` for the chip's popup)
+  is the same one every shell plugin has; anything that can reach your shell socket
   can already rearrange the bar. The `renderTo` development helper only writes
   a `.png` under `~/.cache`.
 
@@ -221,6 +345,17 @@ nothing outside its temp directories:
 tests/install_test.sh
 ```
 
+`tests/profiles_test.sh` runs the profile commands the same way, against a
+fake Omarchy with a few manifests, a stub `omarchy-shell` and Omarchy's real
+`omarchy-shell-config`: first run, save-as, what a switch saves and restores,
+shared and per-profile settings, services kept alive, the switcher kept on the
+bar, uninstalled plugins, the center pin, naming and deleting, the chip, and
+the refusals.
+
+```bash
+tests/profiles_test.sh
+```
+
 Any public function is reachable while the overlay is open, which is how the
 layout actions are tested headlessly:
 
@@ -228,6 +363,9 @@ layout actions are tested headlessly:
 omarchy-shell shell call ninepointlabs.barkeep selectId omarchy.weather
 omarchy-shell shell call ninepointlabs.barkeep runAction sectionRight
 omarchy-shell shell call ninepointlabs.barkeep renderTo ~/.cache/barkeep.png
+omarchy-shell shell call ninepointlabs.barkeep setView profiles
+omarchy-shell shell call ninepointlabs.barkeep selectProfile 1
+omarchy-shell shell call ninepointlabs.barkeep applyProfile ""
 ```
 
 ## License

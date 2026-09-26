@@ -2,7 +2,8 @@
 
 # Install (or refresh) Barkeep into the Omarchy shell.
 #
-#   ./install.sh            copy the plugin, enable it, add the app entry
+#   ./install.sh            copy the plugin, enable it, add the app entry, and
+#                           (asked in a terminal) put the profile switcher on the bar
 #   ./install.sh --uninstall  remove all of that again
 #
 # The plugin is copied rather than symlinked: the shell's folder watcher only
@@ -163,6 +164,9 @@ is_our_bin_link() {
 
 if [[ ${1:-} == "--uninstall" ]]; then
   omarchy-shell -q shell hide "$ID" || true
+  # Twice: the overlay's plugins[] entry and the switcher chip on the bar are
+  # separate entries, and each call removes one.
+  omarchy-shell -q shell setPluginEnabled "$ID" false || true
   omarchy-shell -q shell setPluginEnabled "$ID" false || true
 
   if [[ -L $TARGET ]]; then
@@ -299,6 +303,15 @@ EOF
 chmod 644 "$TMP_DESKTOP"
 mv -T -- "$TMP_DESKTOP" "$DESKTOP"
 
+# Barkeep is two entries in shell.json: a plugins[] entry that keeps the
+# overlay enabled, and (optionally) a bar.layout entry for the profile switcher
+# chip. `barkeep-ops mutate chip-on|chip-off` writes both through Omarchy's own
+# shell.json helper, so the overlay is enabled either way.
+chip_on_bar() {
+  local config="$HOME_DIR/.config/omarchy/shell.json"
+  [[ -s $config ]] && jq -e --arg id "$ID" 'any(.bar.layout[]?[]?; (if type == "object" then .id else . end) == $id)' "$config" >/dev/null 2>&1
+}
+
 if omarchy-shell shell ping >/dev/null 2>&1; then
   omarchy-shell shell rescanPlugins >/dev/null
   # The scan runs in the background; give it a moment before enabling.
@@ -308,9 +321,18 @@ if omarchy-shell shell ping >/dev/null 2>&1; then
     fi
     sleep 0.3
   done
-  result=$(omarchy-shell shell enablePlugin "$ID" '{}' 2>&1 || true)
-  if [[ $result == "ok" ]]; then
+  chip="chip-off"
+  if chip_on_bar; then
+    chip="chip-on"
+  elif [[ -t 0 && -t 1 ]]; then
+    read -r -p "Put the bar profile switcher on the bar? [Y/n] " answer || answer="n"
+    [[ $answer =~ ^[Nn] ]] || chip="chip-on"
+  fi
+  if result=$("$TARGET/bin/barkeep-ops" mutate "$chip" "$ID" 2>&1); then
     echo "Barkeep installed and enabled."
+    if [[ $chip == "chip-off" ]]; then
+      echo "Put the profile switcher on the bar any time: barkeep chip on"
+    fi
   else
     echo "Barkeep copied, but enabling answered: $result" >&2
     echo "Run: omarchy plugin enable $ID" >&2

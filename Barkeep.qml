@@ -30,10 +30,14 @@ Item {
     ? String(manifest.__sourceDir)
     : Quickshell.env("HOME") + "/.config/omarchy/plugins/ninepointlabs.barkeep"
   readonly property string opsPath: sourceDir + "/bin/barkeep-ops"
+  readonly property string profilesPath: sourceDir + "/bin/barkeep-profiles"
+  readonly property string storePath: Quickshell.env("HOME") + "/.config/omarchy/barkeep/profiles.json"
   readonly property var sections: ["left", "center", "right"]
   readonly property int inspectMaxAgeMs: 5 * 60 * 1000
 
   property bool opened: false
+  // "plugins" or "profiles"; Tab flips between them.
+  property string view: "plugins"
   property string filterText: ""
   property int selectedIndex: -1
   property var rows: []
@@ -90,11 +94,15 @@ Item {
     }
 
     root.opened = true
+    root.view = payload.view === "profiles" ? "profiles" : "plugins"
     root.filterText = ""
+    root.naming = ""
     root.confirmOpen = false
     root.pendingConfirm = null
     root.rebuild()
     root.refreshCatalog()
+    storeFile.reload()
+    if (root.view === "profiles") root.selectProfile(Model.profileIndex(root.profiles, root.activeKey))
     if (Date.now() - Model.state.inspectedAt > root.inspectMaxAgeMs || payload.recheck === true) root.checkUpdates()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -320,7 +328,13 @@ Item {
 
   function toggleEnabled(row) {
     if (row.custom) { root.say("Custom modules are declared in shell.json; edit them there.", false); return }
-    if (row.isSelf) { root.say("Barkeep cannot switch itself off from inside. Run: omarchy plugin disable " + root.selfId, false); return }
+    // Barkeep's own widget is the profile switcher. Only the chip moves; the
+    // overlay keeps its own entry and stays enabled.
+    if (row.isSelf) {
+      if (row.onBar) root.mutate(["chip-off", root.selfId], "The profile switcher is off the bar; Barkeep itself stays on.", "Could not take the switcher off the bar.")
+      else root.mutate(["chip-on", root.selfId], "The profile switcher is on the bar, at the start of the right section.", "Could not put the switcher on the bar.")
+      return
+    }
     if (row.isBarOption) {
       if (row.active) { root.say("A bar has no off switch; pick another bar option to replace it.", false); return }
       root.mutate(["use-bar", row.id], "Now using " + row.name + " as the bar.", "Could not switch bars.")
@@ -459,7 +473,10 @@ Item {
     root.confirmOpen = false
     root.pendingConfirm = null
     if (!request) return
-    if (request.kind === "update") {
+    if (request.kind === "deleteProfile") {
+      root.profileCommand(["delete", request.key], "")
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    } else if (request.kind === "update") {
       Quickshell.execDetached([root.opsPath, "update"].concat(request.names))
       root.dismiss()
     } else if (request.kind === "remove") {
@@ -473,6 +490,122 @@ Item {
       else
         Quickshell.execDetached([root.opsPath, "remove", request.names[0]])
       root.dismiss()
+    }
+  }
+
+  // --------------------------------------------------------------- profiles
+
+  // The store is bin/barkeep-profiles' file; this view reads it (and watches
+  // it, so a switch from the bar chip or a key binding shows up here) and
+  // changes it only through that script.
+  property var profiles: []
+  property string activeKey: ""
+  property int profileCursor: -1
+  readonly property var currentProfile: root.profileCursor >= 0 && root.profileCursor < root.profiles.length
+    ? root.profiles[root.profileCursor] : null
+  readonly property var profileStripData: {
+    var catalog = root.catalogPlugins
+    var profile = root.currentProfile
+    if (!profile || profile.key === root.activeKey) return root.strip
+    return Model.profileStrip(catalog, profile)
+  }
+  property bool storeInitTried: false
+  // "", "new", "rename" or "duplicate": what the name being typed is for.
+  property string naming: ""
+  property string nameDraft: ""
+  property var profileQueue: []
+
+  function applyStore(text) {
+    var parsed = Model.parseStore(text)
+    if (!parsed) { root.say("~/.config/omarchy/barkeep/profiles.json could not be read.", true); return }
+    var keepKey = root.currentProfile ? root.currentProfile.key : parsed.active
+    root.profiles = parsed.profiles
+    root.activeKey = parsed.active
+    var at = Model.profileIndex(root.profiles, keepKey)
+    root.selectProfile(at >= 0 ? at : Model.profileIndex(root.profiles, root.activeKey))
+  }
+
+  function selectProfile(index) {
+    if (root.profiles.length === 0) { root.profileCursor = -1; return }
+    root.profileCursor = Math.max(0, Math.min(index, root.profiles.length - 1))
+    profileList.positionViewAtIndex(root.profileCursor, ListView.Contain)
+  }
+
+  function setView(next) {
+    root.view = next
+    root.naming = ""
+    if (next === "profiles" && root.profileCursor < 0) root.selectProfile(Model.profileIndex(root.profiles, root.activeKey))
+  }
+
+  function profileCommand(args, okText) {
+    root.profileQueue = root.profileQueue.concat([{ args: args, ok: okText }])
+    root.pumpProfile()
+  }
+
+  function pumpProfile() {
+    if (profileProcess.running || root.profileQueue.length === 0) return
+    var job = root.profileQueue[0]
+    root.profileQueue = root.profileQueue.slice(1)
+    profileProcess.okText = job.ok
+    profileProcess.command = [root.profilesPath].concat(job.args)
+    profileProcess.running = true
+  }
+
+  function finishProfile(exitCode, out, err) {
+    var line = String(exitCode === 0 ? out : err || out).trim().split("\n").pop() || ""
+    if (exitCode === 0) root.say(profileProcess.okText || line, false)
+    else root.say(line.replace(/^barkeep-profiles: /, "") || "barkeep-profiles exited " + exitCode, true)
+    storeFile.reload()
+    root.refreshCatalog()
+    root.pumpProfile()
+  }
+
+  function applyProfile() {
+    var p = root.currentProfile
+    if (!p) return
+    if (p.key === root.activeKey) { root.say(p.name + " is the profile in use. Arrange the bar in the Plugins view (Tab); it is saved when you switch away.", false); return }
+    root.profileCommand(["use", p.key], "Switched the bar to " + p.name + ".")
+  }
+
+  function cycleIcon() {
+    var p = root.currentProfile
+    if (!p) return
+    root.profileCommand(["icon", p.key, Model.nextIcon(p.icon)], "")
+  }
+
+  function startNaming(kind) {
+    if (kind !== "new" && !root.currentProfile) return
+    root.naming = kind
+    root.nameDraft = kind === "rename" ? root.currentProfile.name : ""
+  }
+
+  function finishNaming() {
+    var name = root.nameDraft.trim()
+    var kind = root.naming
+    root.naming = ""
+    if (!name) return
+    var p = root.currentProfile
+    if (kind === "new") root.profileCommand(["save", name], "Saved the current bar as " + name + "; it is now the profile in use.")
+    else if (kind === "rename" && p) root.profileCommand(["rename", p.key, name], "Renamed to " + name + ".")
+    else if (kind === "duplicate" && p) root.profileCommand(["duplicate", p.key, name], "Copied " + p.name + " as " + name + ".")
+  }
+
+  function requestDeleteProfile() {
+    var p = root.currentProfile
+    if (!p) return
+    if (p.key === root.activeKey) { root.say(p.name + " is the profile in use; switch to another one before deleting it.", false); return }
+    if (root.profiles.length < 2) return
+    root.askConfirm({ kind: "deleteProfile", key: p.key, message: "Delete the bar profile " + p.name + "? Your plugins and their settings are not affected.", confirmText: "Delete" })
+  }
+
+  function runProfileAction(action) {
+    switch (action) {
+      case "apply": root.applyProfile(); break
+      case "new": root.startNaming("new"); break
+      case "rename": root.startNaming("rename"); break
+      case "duplicate": root.startNaming("duplicate"); break
+      case "icon": root.cycleIcon(); break
+      case "delete": root.requestDeleteProfile(); break
     }
   }
 
@@ -526,6 +659,44 @@ Item {
   }
 
   Process {
+    id: profileProcess
+    command: []
+    property string okText: ""
+    property string collected: ""
+    property string collectedErr: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: profileProcess.collected = text
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: profileProcess.collectedErr = text
+    }
+    onExited: function(exitCode) {
+      var out = profileProcess.collected
+      var err = profileProcess.collectedErr
+      profileProcess.collected = ""
+      profileProcess.collectedErr = ""
+      root.finishProfile(exitCode, out, err)
+    }
+  }
+
+  FileView {
+    id: storeFile
+    path: root.storePath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.applyStore(text())
+    // First run: seed the store from the current bar, then read it.
+    onLoadFailed: function(error) {
+      if (root.storeInitTried) return
+      root.storeInitTried = true
+      root.profileCommand(["init"], "")
+    }
+  }
+
+  Process {
     id: inspectProcess
     command: [root.opsPath, "inspect"]
     stdout: StdioCollector {
@@ -552,6 +723,17 @@ Item {
     // non-printing key so typing never has to be switched on.
     var shift = (event.modifiers & Qt.ShiftModifier) !== 0
     var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
+
+    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+      root.setView(root.view === "plugins" ? "profiles" : "plugins")
+      event.accepted = true
+      return
+    }
+    if (root.view === "profiles") {
+      root.handleProfileKey(event, ctrl)
+      event.accepted = true
+      return
+    }
 
     if (event.key === Qt.Key_Escape) {
       if (root.filterText) root.setFilter("")
@@ -598,6 +780,30 @@ Item {
       return
     }
     event.accepted = true
+  }
+
+  // Profiles view keys. While a name is being typed every printable key goes
+  // into it, the same way typing filters the plugin list.
+  function handleProfileKey(event, ctrl) {
+    if (root.naming) {
+      if (event.key === Qt.Key_Escape) root.naming = ""
+      else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) root.finishNaming()
+      else if (Util.editsFilter(event, root.nameDraft)) root.nameDraft = Util.editedFilter(event, root.nameDraft).slice(0, 40)
+      else if (!ctrl && event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127)
+        root.nameDraft = (root.nameDraft + event.text).slice(0, 40)
+      return
+    }
+    if (event.key === Qt.Key_Escape) root.dismiss()
+    else if (event.key === Qt.Key_Down) root.selectProfile(root.profileCursor + 1)
+    else if (event.key === Qt.Key_Up) root.selectProfile(root.profileCursor - 1)
+    else if (event.key === Qt.Key_Home) root.selectProfile(0)
+    else if (event.key === Qt.Key_End) root.selectProfile(root.profiles.length - 1)
+    else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) root.applyProfile()
+    else if (event.key === Qt.Key_Delete) root.requestDeleteProfile()
+    else if (event.key === Qt.Key_F2 || (ctrl && event.key === Qt.Key_E)) root.startNaming("rename")
+    else if (ctrl && event.key === Qt.Key_N) root.startNaming("new")
+    else if (ctrl && event.key === Qt.Key_D) root.startNaming("duplicate")
+    else if (ctrl && event.key === Qt.Key_I) root.cycleIcon()
   }
 
   // ---------------------------------------------------------------- window
@@ -699,8 +905,31 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
             }
 
+            Repeater {
+              model: [{ key: "plugins", label: "Plugins" }, { key: "profiles", label: "Profiles" }]
+
+              delegate: Text {
+                required property var modelData
+                textFormat: Text.PlainText
+                text: modelData.label
+                color: root.view === modelData.key ? root.selectedText : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: root.view === modelData.key
+                font.underline: root.view === modelData.key
+                anchors.verticalCenter: parent.verticalCenter
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.setView(modelData.key)
+                }
+              }
+            }
+
             Text {
               textFormat: Text.PlainText
+              visible: root.view === "plugins"
               text: root.filterText ? root.filterText + "▏" : "Type to filter…"
               color: root.filterText ? root.foreground : root.dim
               font.family: root.fontFamily
@@ -726,6 +955,19 @@ Item {
                 from: 0; to: 360; duration: 1200; loops: Animation.Infinite
                 running: root.checking
               }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.activeKey !== ""
+              text: {
+                var p = Model.profileByKey(root.profiles, root.activeKey)
+                return p ? p.icon + " " + p.name : ""
+              }
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              anchors.verticalCenter: parent.verticalCenter
             }
 
             Text {
@@ -757,14 +999,15 @@ Item {
             anchors.margins: Style.spacing.md
             spacing: 0
 
+            // In the Profiles view this previews the profile under the cursor.
             Repeater {
-              model: root.strip
+              model: root.view === "profiles" ? root.profileStripData : root.strip
 
               delegate: Item {
                 id: sectionRow
                 required property var modelData
                 required property int index
-                readonly property bool holdsCurrent: root.current && root.current.onBar && root.current.section === modelData.section
+                readonly property bool holdsCurrent: root.view === "plugins" && root.current && root.current.onBar && root.current.section === modelData.section
 
                 width: parent.width
                 height: Math.max(Style.spacing.controlHeight, chipFlow.implicitHeight + Style.spacing.sm * 2)
@@ -818,7 +1061,7 @@ Item {
                     delegate: Item {
                       id: chip
                       required property var modelData
-                      readonly property bool selected: root.current && root.current.id === modelData.id
+                      readonly property bool selected: root.view === "plugins" && root.current && root.current.id === modelData.id
 
                       width: chipLabel.implicitWidth + Style.spacing.rowPaddingX * 2
                       height: Style.spacing.controlHeight - Style.spacing.sm
@@ -845,8 +1088,8 @@ Item {
                       MouseArea {
                         anchors.fill: parent
                         hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.selectId(chip.modelData.id)
+                        cursorShape: root.view === "plugins" ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: if (root.view === "plugins") root.selectId(chip.modelData.id)
                       }
                     }
                   }
@@ -864,6 +1107,224 @@ Item {
           Row {
             anchors.fill: parent
             spacing: 0
+            visible: root.view === "profiles"
+
+            Item {
+              width: Math.round(parent.width * 0.42)
+              height: parent.height
+              clip: true
+
+              ListView {
+                id: profileList
+                anchors.fill: parent
+                anchors.rightMargin: root.contentMargin
+                model: root.profiles
+                clip: true
+                spacing: Style.space(2)
+                boundsBehavior: Flickable.StopAtBounds
+
+                delegate: Rectangle {
+                  id: profileRow
+                  required property var modelData
+                  required property int index
+                  readonly property bool hasCursor: index === root.profileCursor
+                  readonly property bool inUse: modelData.key === root.activeKey
+
+                  width: ListView.view.width
+                  height: root.rowHeight
+                  radius: root.cornerRadius
+                  color: hasCursor ? root.selectedBackground : "transparent"
+
+                  Row {
+                    anchors.fill: parent
+                    anchors.leftMargin: Style.spacing.rowPaddingX
+                    anchors.rightMargin: Style.spacing.rowPaddingX
+                    spacing: Style.spacing.lg
+
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Style.space(18)
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: profileRow.modelData.icon
+                      color: profileRow.hasCursor ? root.selectedText : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.icon
+                      horizontalAlignment: Text.AlignHCenter
+                    }
+
+                    Column {
+                      width: parent.width - Style.space(18) - parent.spacing * 2 - useLabel.width
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.spacing.xxs
+
+                      Text {
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        text: profileRow.modelData.name
+                        color: profileRow.hasCursor ? root.selectedText : root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: profileRow.hasCursor
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        text: profileRow.modelData.widgets + " widgets"
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    Text {
+                      id: useLabel
+                      textFormat: Text.PlainText
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: profileRow.inUse ? "● in use" : ""
+                      color: profileRow.hasCursor ? root.selectedText : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.selectProfile(profileRow.index)
+                    onDoubleClicked: { root.selectProfile(profileRow.index); root.applyProfile() }
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              width: Style.normalBorderWidth
+              height: parent.height
+              color: root.faint
+            }
+
+            Item {
+              width: parent.width - Math.round(parent.width * 0.42) - Style.normalBorderWidth
+              height: parent.height
+              clip: true
+
+              Column {
+                anchors.fill: parent
+                anchors.leftMargin: root.contentMargin
+                spacing: Style.spacing.lg
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: root.currentProfile ? root.currentProfile.icon + "  " + root.currentProfile.name : ""
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.heading
+                  font.bold: true
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: !root.currentProfile ? ""
+                    : root.currentProfile.key === root.activeKey
+                      ? "In use. The strip above is the live bar: arrange it in the Plugins view (Tab) and the changes are saved into this profile when you switch away."
+                      : "The strip above is this profile's saved layout. Enter puts it on the bar; the profile in use is saved first."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                Text {
+                  readonly property var missing: root.currentProfile ? Model.missingPlugins(root.catalogPlugins, root.currentProfile) : []
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  visible: root.catalogLoaded && missing.length > 0
+                  text: "Not installed, so skipped: " + missing.join(", ")
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                // The name being typed for a new, renamed or copied profile.
+                Column {
+                  width: parent.width
+                  spacing: Style.spacing.xs
+                  visible: root.naming !== ""
+
+                  PanelSectionHeader {
+                    text: root.naming === "new" ? "Save the current bar as"
+                      : root.naming === "rename" ? "Rename to" : "Copy as"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    text: (root.nameDraft || "") + "▏"
+                    color: root.selectedText
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.title
+                    elide: Text.ElideLeft
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "⏎ save   esc cancel"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Rectangle { width: parent.width; height: Style.normalBorderWidth; color: root.faint; visible: root.naming === "" }
+
+                Flow {
+                  width: parent.width
+                  spacing: Style.spacing.md
+                  visible: root.naming === ""
+
+                  Repeater {
+                    model: root.currentProfile ? [
+                      { icon: "󰐊", label: "Use this profile", hint: "⏎", action: "apply", enabled: root.currentProfile.key !== root.activeKey },
+                      { icon: "󰑕", label: "Rename", hint: "F2", action: "rename", enabled: true },
+                      { icon: root.currentProfile.icon, label: "Change icon", hint: "^I", action: "icon", enabled: true },
+                      { icon: "󰆏", label: "Duplicate", hint: "^D", action: "duplicate", enabled: true },
+                      { icon: "󰐕", label: "New from the current bar", hint: "^N", action: "new", enabled: true },
+                      { icon: "󰆴", label: "Delete", hint: "⌦", action: "delete", danger: true,
+                        enabled: root.currentProfile.key !== root.activeKey && root.profiles.length > 1 }
+                    ] : []
+
+                    delegate: Button {
+                      required property var modelData
+                      iconText: modelData.icon
+                      text: modelData.label + "  " + modelData.hint
+                      bordered: true
+                      enabled: modelData.enabled
+                      opacity: modelData.enabled ? 1 : 0.4
+                      foreground: modelData.danger ? root.urgent : root.foreground
+                      accent: modelData.danger ? root.urgent : root.accent
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      iconSize: Style.font.bodySmall
+                      onClicked: if (modelData.enabled) root.runProfileAction(modelData.action)
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          Row {
+            anchors.fill: parent
+            spacing: 0
+            visible: root.view === "plugins"
 
             Item {
               id: listPane
@@ -1263,7 +1724,9 @@ Item {
             textFormat: Text.PlainText
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            text: "↑↓ pick   ⏎ on/off   ←→ nudge along the bar   ⇧↑↓ change section   ^P pin   ^U update   ⌦ remove"
+            text: root.view === "profiles"
+              ? "⇥ plugins   ↑↓ pick   ⏎ use   ^N new from bar   F2 rename   ^I icon   ^D duplicate   ⌦ delete"
+              : "⇥ profiles   ↑↓ pick   ⏎ on/off   ←→ nudge   ⇧↑↓ section   ^P pin   ^U update   ⌦ remove"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

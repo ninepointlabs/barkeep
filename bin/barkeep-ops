@@ -3,7 +3,7 @@
 # barkeep-ops — shell-side helper for the Barkeep overlay.
 #
 #   barkeep-ops catalog                JSON: every installed manifest + shell.json
-#   barkeep-ops mutate <op> <id> [...] enable|disable|use-bar|move|pin|unpin
+#   barkeep-ops mutate <op> <id> [...] enable|disable|use-bar|move|pin|unpin|chip-on|chip-off
 #   barkeep-ops inspect [--no-fetch]   JSON: git state of every plugin folder
 #   barkeep-ops update <dir>...        fast-forward plugin folders, then bring Barkeep back
 #   barkeep-ops update-all             every git-managed plugin folder
@@ -238,6 +238,8 @@ cmd_mutate() {
       fi
       out=$(set_center_anchor "$id" 2>&1) ;;
     unpin)    out=$(set_center_anchor "" 2>&1) ;;
+    chip-on)  out=$(set_chip on 2>&1) ;;
+    chip-off) out=$(set_chip off 2>&1) ;;
     *) echo "unknown op '$op'"; return 1 ;;
   esac
   local rc=$?
@@ -257,6 +259,30 @@ set_center_anchor() {
       commit "$NORMALIZE | .bar.centerAnchor = \$id" --arg id "$1"
     fi
     echo "center anchor ${1:-cleared}"
+  )
+}
+
+# Barkeep is an overlay and, since 0.2.0, the profile switcher chip on the bar.
+# The shell counts a third-party plugin as enabled while its id appears
+# anywhere in shell.json, so the overlay keeps a plugins[] entry of its own and
+# the chip is a separate bar.layout entry. Putting the chip on or taking it off
+# touches only the layout entry, never the overlay. Same shared helper as the
+# center anchor, for the same reason: no stock command does exactly this.
+set_chip() {
+  (
+    [[ $1 == on || $1 == off ]] || exit 1
+    source omarchy-shell-config || exit 1
+    local keep_overlay='(if any(.plugins[]; (if type == "object" then .id else . end) == $id) then . else .plugins += [{id: $id}] end)'
+    if [[ $1 == on ]]; then
+      commit "$NORMALIZE | $keep_overlay
+        | if any(.bar.layout[][]; (if type == \"object\" then .id else . end) == \$id) then .
+          else .bar.layout.right = [{id: \$id}] + .bar.layout.right end" --arg id "$SELF_ID"
+      echo "The profile switcher is on the bar"
+    else
+      commit "$NORMALIZE | $keep_overlay
+        | .bar.layout |= map_values(map(select((if type == \"object\" then .id else . end) != \$id)))" --arg id "$SELF_ID"
+      echo "The profile switcher is off the bar"
+    fi
   )
 }
 

@@ -2,16 +2,27 @@
 
 # barkeep — summon the Barkeep overlay in the running Omarchy shell.
 #
-#   barkeep            toggle the overlay (default)
-#   barkeep show       open it
-#   barkeep hide       close it
-#   barkeep status     print "open" or "closed"
-#   barkeep check      print git update state for every plugin folder (JSON)
+#   barkeep                    toggle the overlay (default)
+#   barkeep show               open it
+#   barkeep hide               close it
+#   barkeep profiles           open it on the bar profiles
+#   barkeep status             print "open" or "closed"
+#   barkeep check              print git update state for every plugin folder (JSON)
+#   barkeep profile <command>  list | use <p> | next | prev | save <name> | rename | icon | delete
+#   barkeep chip on|off        put the profile switcher on the bar, or take it off
 
 set -euo pipefail
 
 SELF_ID="ninepointlabs.barkeep"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# Profiles work on files, so they do not need the shell to be up.
+case "${1:-}" in
+  profile)
+    shift
+    exec "$HERE/barkeep-profiles" "$@"
+    ;;
+esac
 
 if ! omarchy-shell shell ping >/dev/null 2>&1; then
   echo "barkeep: omarchy-shell is not running" >&2
@@ -21,6 +32,7 @@ fi
 case "${1:-toggle}" in
   toggle) omarchy-shell shell toggle "$SELF_ID" '{}' ;;
   show | open) omarchy-shell shell summon "$SELF_ID" '{}' >/dev/null ;;
+  profiles) omarchy-shell shell summon "$SELF_ID" '{"view":"profiles"}' >/dev/null ;;
   hide | close) omarchy-shell shell hide "$SELF_ID" ;;
   status)
     if [[ $(omarchy-shell shell call "$SELF_ID" isOpen "" 2>/dev/null) == "true" ]]; then
@@ -30,7 +42,14 @@ case "${1:-toggle}" in
     fi
     ;;
   check) "$HERE/barkeep-ops" inspect ;;
-  -h | --help | help) sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  chip)
+    case "${2:-}" in
+      on) "$HERE/barkeep-ops" mutate chip-on "$SELF_ID" ;;
+      off) "$HERE/barkeep-ops" mutate chip-off "$SELF_ID" ;;
+      *) echo "barkeep: chip on|off" >&2; exit 1 ;;
+    esac
+    ;;
+  -h | --help | help) sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)
     echo "barkeep: unknown command '$1'" >&2
     exit 1

@@ -110,8 +110,9 @@ B="$H/.local/bin/barkeep"
 assert_installs "$H" "a fresh install succeeds"
 assert_file "$T/manifest.json" "plugin manifest is installed"
 assert_file "$T/Barkeep.qml" "overlay is installed"
+assert_file "$T/Switcher.qml" "bar switcher is installed"
 assert_contains "$T/manifest.json" "\"id\": \"$ID\"" "installed manifest is ours"
-if [[ -x $T/bin/barkeep && -x $T/bin/barkeep-ops ]]; then
+if [[ -x $T/bin/barkeep && -x $T/bin/barkeep-ops && -x $T/bin/barkeep-profiles ]]; then
   ok "launchers are executable"
 else
   bad "launchers are executable"

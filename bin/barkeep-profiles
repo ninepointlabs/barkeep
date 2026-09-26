@@ -1,0 +1,415 @@
+#!/bin/bash
+
+# barkeep-profiles — named bar layouts you switch between.
+#
+#   barkeep-profiles list                      one line per profile, * marks the one in use
+#   barkeep-profiles status                    JSON: the whole profile store
+#   barkeep-profiles init                      create the store from the current bar
+#   barkeep-profiles use <profile>             switch the bar to a profile
+#   barkeep-profiles next | prev               switch to the next / previous profile
+#   barkeep-profiles save <name> [--icon <g>]  save the current bar as a new profile, and use it
+#   barkeep-profiles duplicate <profile> <name>
+#   barkeep-profiles rename <profile> <name>
+#   barkeep-profiles icon <profile> <glyph>
+#   barkeep-profiles delete <profile>
+#
+# <profile> is a profile's key or its name. Add --notify to any command to
+# report a failure as a desktop notification as well (the bar switcher does,
+# since nobody reads its stderr).
+#
+# A profile is a bar layout: which widgets sit in the left, center and right
+# sections, in what order, and which one is pinned to the center. It lives in
+# ~/.config/omarchy/barkeep/profiles.json, never in shell.json. Switching:
+#
+#   1. The live bar is saved back into the profile in use, so anything you
+#      rearranged while in it is kept.
+#   2. Settings for single-instance widgets (theme-rotate's theme list, a mail
+#      widget's folders) are shared by every profile: the latest copy from the
+#      live bar goes into a shared store and is written back on every switch.
+#      Widgets that allow several instances (clocks, indicator groups) keep
+#      their own entries per profile.
+#   3. The target layout is written with the same atomic commit the stock
+#      `omarchy bar` commands use, and the shell reloads it. Uninstalled
+#      plugins are skipped but stay in the profile. Barkeep's own switcher
+#      stays on the bar if it was there. A third-party plugin that runs a
+#      service and leaves the bar is kept enabled through a plugins[] entry, so
+#      hiding its icon never stops its background work.
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+SELF_ID="ninepointlabs.barkeep"
+STORE_DIR="$HOME/.config/omarchy/barkeep"
+STORE="$STORE_DIR/profiles.json"
+SHELL_CONFIG="$HOME/.config/omarchy/shell.json"
+SHELL_DEFAULTS="${OMARCHY_PATH:-/usr/share/omarchy}/config/omarchy/shell.json"
+DEFAULT_ICON=$'\xf3\xb0\x95\xae'   # md-view_dashboard (U+F056E), as UTF-8 so no locale is needed
+RUN_UID="$(id -u)"
+NOTIFY=0
+
+WORK="$(mktemp -d)"
+trap 'rm -rf -- "$WORK"' EXIT
+
+fail() {
+  echo "barkeep-profiles: $*" >&2
+  if (( NOTIFY )); then
+    omarchy-notification-send "Barkeep" "$*" >/dev/null 2>&1 || true
+  fi
+  exit 1
+}
+
+# ------------------------------------------------------------------- jq library
+
+# Shared by every program below. A layout is {left, center, right}, each a list
+# of entries; an entry is {id, ...inline settings} exactly as shell.json has it.
+DEFS='
+  def sections: ["left", "center", "right"];
+  def eid: if type == "object" then (.id // "" | tostring) elif type == "string" then . else "" end;
+  def as_entry: if type == "object" then . elif type == "string" then {id: .} else empty end;
+  def norm_layout:
+    (if type == "object" then . else {} end) as $l
+    | reduce sections[] as $s ({};
+        .[$s] = [($l[$s] // [] | if type == "array" then .[] else empty end) | as_entry | select(eid != "")]);
+  def live_layout: (.bar // {} | .layout // {}) | norm_layout;
+  def anchor_of: (.bar // {} | .centerAnchor // "" | tostring);
+  def custom: (.type // "") as $t | $t == "command" or $t == "qml";
+  def single($cat): ($cat[eid] // null) as $m
+    | $m != null and ((($m.barWidget // {}).allowMultiple // false) != true);
+  def widget_count: [.layout // {} | norm_layout | .[][]] | length;
+
+  # Latest settings of every single-instance widget on the live bar. If a
+  # widget somehow sits twice, its first entry wins.
+  def captured_settings($cat; $cfg):
+    reduce ([($cfg | live_layout)[sections[]][] | select(single($cat))] | reverse[]) as $e ({};
+      .[$e | eid] = $e);
+
+  # Save the live bar into the profile in use and refresh the shared settings.
+  def capture($cat; $cfg):
+    (.active // "") as $a
+    | .settings = ((.settings // {}) + captured_settings($cat; $cfg))
+    | .profiles |= map(if .key == $a
+        then .layout = ($cfg | live_layout) | .centerAnchor = ($cfg | anchor_of)
+        else . end);
+
+  def profile($key): first(.profiles[] | select(.key == $key)) // null;
+
+  # shell.json in, shell.json out: the bar switched to profile $key.
+  def apply_profile($st; $cat; $key; $self):
+    . as $cfg
+    | ($cfg | live_layout) as $live
+    | ($st | profile($key)) as $p
+    | (reduce sections[] as $s ({layout: {}, seen: {}};
+        .layout[$s] = []
+        | reduce (($p.layout // {} | norm_layout)[$s][]) as $e (.;
+            if ($e | custom) then .layout[$s] += [$e]
+            elif ($cat[$e | eid] // null) == null then .
+            elif ($e | single($cat)) then
+              if .seen[$e | eid] then .
+              else .seen[$e | eid] = true
+                | .layout[$s] += [($st.settings[$e | eid] // $e) | .id = ($e | eid)]
+              end
+            else .layout[$s] += [$e] end))
+      | .layout) as $picked
+    | (first(sections[] as $s | $live[$s] | to_entries[] | select(.value | eid == $self)
+        | {s: $s, i: .key, e: .value}) // null) as $selfAt
+    | (if $selfAt != null and ([$picked[][] | eid] | index($self)) == null
+        then $picked | .[$selfAt.s] = (.[$selfAt.s][0:$selfAt.i] + [$selfAt.e] + .[$selfAt.s][$selfAt.i:])
+        else $picked end) as $next
+    | ([$next[][] | eid]) as $nextIds
+    | ([$cfg.plugins[]? | eid]) as $listed
+    | ([$live[][] | eid] | unique | map(select(. as $id
+        | ($nextIds | index($id)) == null
+        and ($listed | index($id)) == null
+        and ($cat[$id] // null) != null
+        and ($cat[$id].__isFirstParty != true)
+        and (($cat[$id].kinds // []) | any(. != "bar-widget" and . != "bar"))))) as $keep
+    | .bar.layout = $next
+    | .plugins = ((.plugins // []) + ($keep | map({id: .})))
+    | (if ($cat[$self] // null) != null and $selfAt != null and ([.plugins[] | eid] | index($self)) == null
+        then .plugins += [{id: $self}] else . end)
+    | (($p.centerAnchor // "") as $a
+        | if $a != "" and ([$next.center[] | eid] | index($a)) != null
+          then .bar.centerAnchor = $a else del(.bar.centerAnchor) end);
+
+  def clean_name: tostring | gsub("[[:cntrl:]]"; "") | gsub("^\\s+|\\s+$"; "");
+  def slug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-+|-+$"; "") | .[0:32]
+    | if . == "" then "profile" else . end;
+  def unique_key($base):
+    [.profiles[].key] as $taken
+    | if ($taken | index($base)) == null then $base
+      else first(range(2; 1000) | "\($base)-\(.)" | select(. as $k | $taken | index($k) == null)) end;
+'
+
+# ---------------------------------------------------------------- store access
+
+owned_by_us() {
+  [[ $(stat -c '%u' -- "$1" 2>/dev/null) == "$RUN_UID" ]]
+}
+
+# ~/.config/omarchy/barkeep must be a real directory we own, reached through
+# real directories we own, so a planted link cannot redirect our writes.
+store_dir_ok() {
+  local cur="$HOME" comp
+  [[ -n ${HOME:-} && -d $HOME ]] || fail "HOME is not a directory"
+  for comp in .config omarchy barkeep; do
+    cur="$cur/$comp"
+    if [[ -L $cur ]]; then
+      fail "$cur is a symlink; refusing to write through it"
+    elif [[ ! -e $cur && $comp == barkeep ]]; then
+      mkdir -m 700 -- "$cur" || fail "could not create $cur"
+    fi
+    [[ -d $cur ]] || fail "$cur is not a directory"
+    owned_by_us "$cur" || fail "$cur is not owned by you"
+  done
+  if [[ -e $STORE || -L $STORE ]]; then
+    [[ -f $STORE && ! -L $STORE ]] || fail "$STORE is not a plain file"
+    owned_by_us "$STORE" || fail "$STORE is not owned by you"
+  fi
+}
+
+# One change at a time: a scroll on the switcher and a keypress in the overlay
+# must not both read the same store and write different answers.
+lock_store() {
+  local lock="$STORE_DIR/.lock"
+  [[ ! -L $lock ]] || fail "$lock is a symlink"
+  exec 9>>"$lock" || fail "could not open $lock"
+  flock -w 10 9 || fail "another profile change is still running"
+}
+
+live_config_file() {
+  if [[ -s $SHELL_CONFIG ]]; then printf '%s\n' "$SHELL_CONFIG"; else printf '%s\n' "$SHELL_DEFAULTS"; fi
+}
+
+load_catalog() {
+  "$HERE/barkeep-ops" catalog >"$WORK/catalog.raw" 2>/dev/null || fail "could not read the plugin catalog"
+  jq -e '.plugins | objects' "$WORK/catalog.raw" >"$WORK/catalog.json" 2>/dev/null || fail "the plugin catalog is not valid JSON"
+  jq '.config // {}' "$WORK/catalog.raw" >"$WORK/config.json"
+}
+
+store_valid() {
+  jq -e '.version == 1 and (.profiles | type == "array" and length > 0)
+    and all(.profiles[]; (.key | type == "string") and (.name | type == "string"))' "$1" >/dev/null 2>&1
+}
+
+write_store() {
+  local src="$1" tmp
+  store_valid "$src" || fail "refusing to write an invalid profile store"
+  tmp="$(mktemp "$STORE_DIR/.profiles.XXXXXX")" || fail "could not create a temp file in $STORE_DIR"
+  if ! jq . "$src" >"$tmp"; then
+    rm -f -- "$tmp"
+    fail "could not write $STORE"
+  fi
+  chmod 600 "$tmp"
+  mv -T -- "$tmp" "$STORE" || { rm -f -- "$tmp"; fail "could not replace $STORE"; }
+}
+
+# Make sure a store exists, seeded with the current bar as "Default".
+ensure_store() {
+  if [[ -e $STORE ]]; then
+    store_valid "$STORE" || fail "$STORE is not a valid profile store; fix or remove it"
+    return
+  fi
+  load_catalog
+  jq -n "$DEFS"'
+    $cfg[0] as $cfg
+    | {version: 1, active: "default",
+       profiles: [{key: "default", name: "Default", icon: $icon,
+                   layout: ($cfg | live_layout), centerAnchor: ($cfg | anchor_of)}],
+       settings: captured_settings($cat[0]; $cfg)}' \
+    --slurpfile cfg "$WORK/config.json" --slurpfile cat "$WORK/catalog.json" --arg icon "$DEFAULT_ICON" \
+    >"$WORK/new.json" || fail "could not build the first profile"
+  write_store "$WORK/new.json"
+}
+
+# Profile key from a key or a (case-insensitive) name. Prints the key.
+resolve() {
+  local want="$1" key
+  [[ -n $want ]] || fail "which profile?"
+  key=$(jq -r --arg w "$want" '
+    (first(.profiles[] | select(.key == $w)) // first(.profiles[] | select((.name | ascii_downcase) == ($w | ascii_downcase))) // null)
+    | if . == null then "" else .key end' "$STORE")
+  [[ -n $key ]] || fail "no profile called '$want' (see: barkeep profile list)"
+  printf '%s\n' "$key"
+}
+
+profile_name() {
+  jq -r --arg k "$1" 'first(.profiles[] | select(.key == $k)) | .name' "$STORE"
+}
+
+valid_name() {
+  local name
+  name=$(jq -rn --arg n "$1" "$DEFS"'$n | clean_name')
+  [[ -n $name ]] || fail "a profile needs a name"
+  (( ${#name} <= 40 )) || fail "keep profile names to 40 characters"
+  printf '%s\n' "$name"
+}
+
+valid_icon() {
+  jq -en --arg g "$1" '$g | length >= 1 and length <= 4 and (test("[\\s[:cntrl:]]") | not)' >/dev/null ||
+    fail "an icon is one to four characters, such as a Nerd Font glyph"
+}
+
+# ------------------------------------------------------------------- commands
+
+cmd_list() {
+  jq -r '.active as $a | .profiles[]
+    | "\(if .key == $a then "*" else " " end) \(.key)\t\(.icon // "")  \(.name)  (\([.layout // {} | .[]?[]?] | length) widgets)"' "$STORE"
+}
+
+cmd_status() {
+  jq . "$STORE"
+}
+
+# Write shell.json through Omarchy's own helper: one jq program over the file,
+# atomic replace, then a shell reloadConfig. Subshell: it installs an EXIT trap.
+commit_profile() {
+  local key="$1"
+  (
+    # shellcheck source=/dev/null
+    source omarchy-shell-config || exit 1
+    commit "$DEFS $NORMALIZE | apply_profile(\$st[0]; \$cat[0]; \$key; \$self)" \
+      --slurpfile st "$STORE" --slurpfile cat "$WORK/catalog.json" --arg key "$key" --arg self "$SELF_ID"
+  )
+}
+
+cmd_use() {
+  local key name
+  key=$(resolve "$1") || exit 1
+  name=$(profile_name "$key")
+  load_catalog
+  cp -- "$STORE" "$WORK/before.json"
+  jq "$DEFS"'capture($cat[0]; $cfg[0]) | .active = $key' \
+    --slurpfile cat "$WORK/catalog.json" --slurpfile cfg "$WORK/config.json" --arg key "$key" \
+    "$STORE" >"$WORK/after.json" || fail "could not save the current bar"
+  # Record the switch first: if the bar write then fails, put the old store
+  # back so the next switch does not save this layout into the wrong profile.
+  write_store "$WORK/after.json"
+  local out
+  if ! out=$(commit_profile "$key" 2>&1); then
+    write_store "$WORK/before.json"
+    fail "could not switch to $name: $(printf '%s' "$out" | tail -n 1)"
+  fi
+  echo "Bar profile: $name"
+}
+
+cmd_step() {
+  local step="$1" key
+  key=$(jq -r --argjson step "$step" '
+    (.profiles | map(.key)) as $keys
+    | (.active // "") as $active
+    | ($keys | index($active)) as $at
+    | $keys[((($at // 0) + $step) % ($keys | length) + ($keys | length)) % ($keys | length)]' "$STORE")
+  cmd_use "$key"
+}
+
+cmd_save() {
+  local name icon="$DEFAULT_ICON"
+  name=$(valid_name "${1:-}") || exit 1
+  shift
+  while (( $# > 0 )); do
+    case "$1" in
+      --icon) icon="${2:-}"; shift 2 ;;
+      *) fail "unknown option '$1'" ;;
+    esac
+  done
+  valid_icon "$icon"
+  load_catalog
+  # Save-as: the live bar becomes the new profile, and the one in use keeps
+  # the layout it was last saved with.
+  jq "$DEFS"'
+    $cfg[0] as $cfg
+    | unique_key($name | slug) as $key
+    | .settings = ((.settings // {}) + captured_settings($cat[0]; $cfg))
+    | .profiles += [{key: $key, name: $name, icon: $icon,
+                     layout: ($cfg | live_layout), centerAnchor: ($cfg | anchor_of)}]
+    | .active = $key' \
+    --slurpfile cat "$WORK/catalog.json" --slurpfile cfg "$WORK/config.json" \
+    --arg name "$name" --arg icon "$icon" "$STORE" >"$WORK/new.json" || fail "could not save the profile"
+  write_store "$WORK/new.json"
+  echo "Saved the current bar as $name"
+}
+
+cmd_duplicate() {
+  local key name
+  key=$(resolve "${1:-}") || exit 1
+  name=$(valid_name "${2:-}") || exit 1
+  load_catalog
+  # The profile in use is whatever the live bar shows, so copy that.
+  jq "$DEFS"'
+    capture($cat[0]; $cfg[0]) as $st
+    | unique_key($name | slug) as $new
+    | $st | .profiles += [($st | profile($key)) + {key: $new, name: $name}]' \
+    --slurpfile cat "$WORK/catalog.json" --slurpfile cfg "$WORK/config.json" \
+    --arg key "$key" --arg name "$name" "$STORE" >"$WORK/new.json" || fail "could not duplicate the profile"
+  write_store "$WORK/new.json"
+  echo "Duplicated $(profile_name "$key") as $name"
+}
+
+cmd_rename() {
+  local key name
+  key=$(resolve "${1:-}") || exit 1
+  name=$(valid_name "${2:-}") || exit 1
+  jq --arg k "$key" --arg n "$name" '.profiles |= map(if .key == $k then .name = $n else . end)' \
+    "$STORE" >"$WORK/new.json" || fail "could not rename the profile"
+  write_store "$WORK/new.json"
+  echo "Renamed to $name"
+}
+
+cmd_icon() {
+  local key
+  key=$(resolve "${1:-}") || exit 1
+  valid_icon "${2:-}"
+  jq --arg k "$key" --arg g "$2" '.profiles |= map(if .key == $k then .icon = $g else . end)' \
+    "$STORE" >"$WORK/new.json" || fail "could not change the icon"
+  write_store "$WORK/new.json"
+  echo "Icon changed"
+}
+
+cmd_delete() {
+  local key name
+  key=$(resolve "${1:-}") || exit 1
+  name=$(profile_name "$key")
+  [[ $(jq -r '.active // ""' "$STORE") != "$key" ]] || fail "$name is the profile in use; switch to another one first"
+  [[ $(jq '.profiles | length' "$STORE") -gt 1 ]] || fail "$name is the only profile"
+  jq --arg k "$key" '.profiles |= map(select(.key != $k))' "$STORE" >"$WORK/new.json" || fail "could not delete the profile"
+  write_store "$WORK/new.json"
+  echo "Deleted $name"
+}
+
+# -------------------------------------------------------------------- dispatch
+
+args=()
+for arg in "$@"; do
+  if [[ $arg == "--notify" ]]; then NOTIFY=1; else args+=("$arg"); fi
+done
+set -- "${args[@]+"${args[@]}"}"
+
+command="${1:-}"
+(( $# > 0 )) && shift
+
+case "$command" in
+  list | status | init | use | next | prev | save | duplicate | rename | icon | delete) ;;
+  "" | -h | --help | help)
+    sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *) fail "unknown command '$command'" ;;
+esac
+
+store_dir_ok
+lock_store
+ensure_store
+
+case "$command" in
+  list) cmd_list ;;
+  status) cmd_status ;;
+  init) : ;;
+  use) cmd_use "${1:-}" ;;
+  next) cmd_step 1 ;;
+  prev) cmd_step -1 ;;
+  save) cmd_save "$@" ;;
+  duplicate) cmd_duplicate "$@" ;;
+  rename) cmd_rename "$@" ;;
+  icon) cmd_icon "$@" ;;
+  delete) cmd_delete "$@" ;;
+esac

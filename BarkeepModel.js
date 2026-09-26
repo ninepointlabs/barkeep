@@ -160,7 +160,7 @@ function makeRow(id, manifest, config, placed, inspectMap, selfId) {
     updatable: !!(inspect && inspect.git && !inspect.symlink),
     updateAvailable: !!(inspect && inspect.git && inspect.behind > 0 && !inspect.dirty),
     removable: !firstParty && !!dir && id !== selfId,
-    canOpen: isBarWidget || hasPanel
+    canOpen: (isBarWidget || hasPanel) && id !== selfId
   }
   row.sourceText = sourceLabel(row)
   row.updateText = updateLabel(row)
@@ -381,7 +381,10 @@ function actionsFor(row) {
   } else if (row.isBarOption) {
     primary.push({ icon: "", label: row.active ? "This is the bar in use" : "Use this bar", hint: "⏎", action: "toggle", enabled: !row.active, selected: false })
   } else if (row.isBarWidget) {
-    primary.push({ icon: row.onBar ? "󰅖" : "󰐕", label: row.onBar ? "Take off the bar" : "Put on the bar", hint: "⏎", action: "toggle", enabled: !row.isSelf, selected: false })
+    // Barkeep's own bar widget is the profile switcher; taking it off the bar
+    // leaves the overlay running.
+    var what = row.isSelf ? " the profile switcher" : ""
+    primary.push({ icon: row.onBar ? "󰅖" : "󰐕", label: row.onBar ? "Take" + what + " off the bar" : "Put" + what + " on the bar", hint: "⏎", action: "toggle", enabled: true, selected: false })
   } else {
     primary.push({ icon: row.enabled ? "󰅖" : "󰐕", label: row.enabled ? "Disable" : "Enable", hint: "⏎", action: "toggle", enabled: !row.isSelf, selected: false })
   }
@@ -403,4 +406,95 @@ function actionsFor(row) {
     ]})
   }
   return groups
+}
+
+// ------------------------------------------------------------- bar profiles
+
+// Icons offered for a profile (Material Design glyphs from the Nerd Font every
+// Omarchy install ships). Written as code points so this file stays ASCII.
+var PROFILE_ICONS = [
+  0xF056E, // view-dashboard
+  0xF00D6, // briefcase
+  0xF0297, // gamepad-variant
+  0xF0FCE, // movie-open
+  0xF075A, // music
+  0xF02CB, // headphones
+  0xF0169, // code-braces
+  0xF018D, // console
+  0xF03D8, // palette
+  0xF0100, // camera
+  0xF0474, // school
+  0xF02DC, // home
+  0xF0176, // coffee
+  0xF14DE, // rocket-launch
+  0xF0F65  // moon-waning-crescent
+].map(function(cp) { return String.fromCodePoint(cp) })
+
+// profiles.json as written by bin/barkeep-profiles, checked just enough that
+// the views can trust its shape. Returns null when it is not usable.
+function parseStore(text) {
+  var parsed = null
+  try { parsed = JSON.parse(text || "") } catch (e) { return null }
+  if (!isObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.profiles)) return null
+  var profiles = []
+  for (var i = 0; i < parsed.profiles.length; i++) {
+    var p = parsed.profiles[i]
+    if (!isObject(p) || typeof p.key !== "string" || typeof p.name !== "string") continue
+    var profile = {
+      key: p.key,
+      name: p.name,
+      icon: typeof p.icon === "string" && p.icon ? p.icon : PROFILE_ICONS[0],
+      layout: isObject(p.layout) ? p.layout : {},
+      centerAnchor: typeof p.centerAnchor === "string" ? p.centerAnchor : ""
+    }
+    // Counted here, while the layout is still plain JSON: a list delegate's
+    // modelData is a converted copy whose nested arrays are not JS arrays.
+    profile.widgets = widgetCount(profile)
+    profiles.push(profile)
+  }
+  if (profiles.length === 0) return null
+  return { active: typeof parsed.active === "string" ? parsed.active : "", profiles: profiles }
+}
+
+function profileIndex(profiles, key) {
+  for (var i = 0; i < (profiles || []).length; i++) if (profiles[i].key === key) return i
+  return -1
+}
+
+function profileByKey(profiles, key) {
+  var i = profileIndex(profiles, key)
+  return i >= 0 ? profiles[i] : null
+}
+
+function widgetCount(profile) {
+  var layout = layoutOf({ bar: { layout: profile ? profile.layout : {} } })
+  return layout.left.length + layout.center.length + layout.right.length
+}
+
+// The bar strip for a saved profile. The profile in use is drawn from the live
+// bar instead, since that is where any unsaved rearranging is.
+function profileStrip(plugins, profile) {
+  return buildStrip(plugins, { bar: { layout: profile ? profile.layout : {}, centerAnchor: profile ? profile.centerAnchor : "" } })
+}
+
+// Widgets a profile names that are no longer installed: they are skipped
+// when it is applied, and listed so the user knows why.
+function missingPlugins(plugins, profile) {
+  var layout = layoutOf({ bar: { layout: profile ? profile.layout : {} } })
+  var out = []
+  for (var s = 0; s < SECTIONS.length; s++) {
+    var list = layout[SECTIONS[s]]
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      var id = entryId(entry)
+      var custom = isObject(entry) && (entry.type === "command" || entry.type === "qml")
+      if (id && !custom && !(plugins && plugins[id]) && out.indexOf(id) === -1) out.push(id)
+    }
+  }
+  return out
+}
+
+function nextIcon(icon) {
+  var at = PROFILE_ICONS.indexOf(icon)
+  return PROFILE_ICONS[(at + 1) % PROFILE_ICONS.length]
 }
