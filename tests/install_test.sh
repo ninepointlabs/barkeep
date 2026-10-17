@@ -119,7 +119,7 @@ else
 fi
 assert_absent "$T/install.sh" "installer itself is not copied"
 assert_absent "$T/README.md" "markdown is not copied"
-assert_absent "$T/LICENSE" "LICENSE is not copied"
+assert_file "$T/LICENSE" "LICENSE is copied (the About page shows it)"
 assert_absent "$T/tests" "tests are not copied"
 assert_file "$D" "app entry is a plain file"
 assert_contains "$D" "Exec=\"$T/bin/barkeep\" toggle" "app entry points at the install"
