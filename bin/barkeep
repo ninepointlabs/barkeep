@@ -6,6 +6,7 @@
 #   barkeep show               open it
 #   barkeep hide               close it
 #   barkeep profiles           open it on the bar profiles
+#   barkeep about              open it on the About page
 #   barkeep status             print "open" or "closed"
 #   barkeep check              print git update state for every plugin folder (JSON)
 #   barkeep profile <command>  list | use <p> | next | prev | save <name> | rename | icon | delete
@@ -33,6 +34,7 @@ case "${1:-toggle}" in
   toggle) omarchy-shell shell toggle "$SELF_ID" '{}' ;;
   show | open) omarchy-shell shell summon "$SELF_ID" '{}' >/dev/null ;;
   profiles) omarchy-shell shell summon "$SELF_ID" '{"view":"profiles"}' >/dev/null ;;
+  about) omarchy-shell shell summon "$SELF_ID" '{"about":true}' >/dev/null ;;
   hide | close) omarchy-shell shell hide "$SELF_ID" ;;
   status)
     if [[ $(omarchy-shell shell call "$SELF_ID" isOpen "" 2>/dev/null) == "true" ]]; then
@@ -49,7 +51,7 @@ case "${1:-toggle}" in
       *) echo "barkeep: chip on|off" >&2; exit 1 ;;
     esac
     ;;
-  -h | --help | help) sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h | --help | help) sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)
     echo "barkeep: unknown command '$1'" >&2
     exit 1

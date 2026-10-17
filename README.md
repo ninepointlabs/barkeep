@@ -123,6 +123,15 @@ Updates and removals always ask first.
 
 ![The confirmation shown before an update is pulled](preview3.png)
 
+### About
+
+`F1`, or the 󰋽 button at the top right of the overlay, shows **About**: the
+version, the license (`L` reads it in place), Nine Point Labs, what Barkeep
+does with your data, and the support address,
+[help@ninepointlabs.com](mailto:help@ninepointlabs.com), with *Email*, *Copy*
+and *Copy version details* buttons. `Esc` goes back to the list; closing the
+overlay leaves it. `barkeep about` opens the overlay straight onto it.
+
 ### Bar profiles
 
 There are more plugins than bar. A profile is one arrangement of the bar:
@@ -201,6 +210,7 @@ In the Plugins view:
 | Ctrl+U / Ctrl+Shift+U | update this plugin / every plugin with an update |
 | Delete | remove (asks first) |
 | Ctrl+R | re-check for updates |
+| F1 | About (Esc goes back) |
 | type | filter |
 | Esc | clear the filter, then close |
 
@@ -216,6 +226,7 @@ In the Profiles view:
 | Ctrl+I | next icon |
 | Ctrl+D | duplicate |
 | Delete | delete (asks first; not the profile in use) |
+| F1 | About (Esc goes back) |
 | Esc | cancel a name being typed, then close |
 
 ### Command line
@@ -224,6 +235,7 @@ In the Profiles view:
 barkeep                         toggle the overlay
 barkeep show|hide
 barkeep profiles                open the overlay on the Profiles view
+barkeep about                   open the overlay on the About page
 barkeep status                  open / closed
 barkeep check                   JSON git state for every plugin folder
 barkeep chip on|off             put the profile switcher on the bar, or take it off
@@ -356,6 +368,16 @@ the refusals.
 tests/profiles_test.sh
 ```
 
+`tests/about_test.sh` checks the About page's facts against `manifest.json`,
+`LICENSE` and the first commit, the prefilled support email, and that the
+privacy statement names every way Barkeep reaches the network (it fails if a
+host or network command is added to the code without being named there). It
+needs `node`:
+
+```bash
+tests/about_test.sh
+```
+
 Any public function is reachable while the overlay is open, which is how the
 layout actions are tested headlessly:
 
@@ -366,6 +388,7 @@ omarchy-shell shell call ninepointlabs.barkeep renderTo ~/.cache/barkeep.png
 omarchy-shell shell call ninepointlabs.barkeep setView profiles
 omarchy-shell shell call ninepointlabs.barkeep selectProfile 1
 omarchy-shell shell call ninepointlabs.barkeep applyProfile ""
+omarchy-shell shell call ninepointlabs.barkeep about ""
 ```
 
 ## License

@@ -51,6 +51,10 @@ Item {
   property bool statusUrgent: false
   property int onBarCount: 0
   property int updateCount: 0
+  // About page (F1 or the 󰋽 button), drawn over the strip and the lists.
+  property bool showAbout: false
+  property bool showLicense: false
+  property string copiedLabel: ""
 
   // Menu surface tokens so themes that style the menu style Barkeep too.
   property color background: Color.menu.background
@@ -95,6 +99,8 @@ Item {
 
     root.opened = true
     root.view = payload.view === "profiles" ? "profiles" : "plugins"
+    root.showAbout = payload.about === true
+    root.showLicense = false
     root.filterText = ""
     root.naming = ""
     root.confirmOpen = false
@@ -109,11 +115,13 @@ Item {
 
   function close() {
     root.confirmOpen = false
+    root.showAbout = false
     root.opened = false
   }
 
   function dismiss() {
     root.confirmOpen = false
+    root.showAbout = false
     root.opened = false
     if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.selfId)
   }
@@ -121,6 +129,59 @@ Item {
   function toggle() {
     if (root.opened) root.dismiss()
     else root.open("{}")
+  }
+
+  // IPC: `omarchy-shell shell call ninepointlabs.barkeep about ""` while the
+  // overlay is open; `barkeep about` summons it straight onto the About page.
+  function about() {
+    if (root.opened) root.showAboutPage()
+    else Quickshell.execDetached(["omarchy-shell", "shell", "summon", root.selfId, '{"about":true}'])
+  }
+
+  // ---------------------------------------------------------------- about
+
+  readonly property string version: Model.manifestVersion(manifestFile.loaded ? manifestFile.text() : "")
+    || (root.manifest && root.manifest.version ? String(root.manifest.version) : "")
+  readonly property string quickshellVersion: Model.probedVersion(function(a, b) { return Quickshell.hasVersion(a, b) }, 0)
+  readonly property string qtVersion: Model.probedVersion(function(a, b) { return Quickshell.hasQtVersion(a, b) }, 6)
+  readonly property string aboutDetails: Model.aboutDetails(root.version, root.quickshellVersion, root.qtVersion,
+    (Quickshell.env("XDG_CURRENT_DESKTOP") || "unknown desktop") + ", " + Qt.platform.pluginName)
+
+  FileView { id: manifestFile; path: root.showAbout ? root.sourceDir + "/manifest.json" : ""; printErrors: false }
+  FileView { id: licenseFile; path: root.showLicense ? root.sourceDir + "/LICENSE" : ""; printErrors: false }
+
+  function showAboutPage() {
+    root.confirmOpen = false
+    root.naming = ""
+    root.showLicense = false
+    root.showAbout = true
+    aboutFlick.contentY = 0
+  }
+
+  function hideAbout() {
+    root.showAbout = false
+    root.showLicense = false
+  }
+
+  function copyText(text, label) {
+    Quickshell.clipboardText = text
+    root.copiedLabel = label
+    copiedTimer.restart()
+  }
+
+  Timer { id: copiedTimer; interval: 1500; onTriggered: root.copiedLabel = "" }
+
+  function handleAboutKey(event) {
+    var step = Style.space(40)
+    var maxY = Math.max(0, aboutFlick.contentHeight - aboutFlick.height)
+    if (event.key === Qt.Key_Escape || event.key === Qt.Key_Backspace || event.key === Qt.Key_F1) root.hideAbout()
+    else if (event.key === Qt.Key_Down) aboutFlick.contentY = Math.min(maxY, aboutFlick.contentY + step)
+    else if (event.key === Qt.Key_Up) aboutFlick.contentY = Math.max(0, aboutFlick.contentY - step)
+    else if (event.key === Qt.Key_PageDown) aboutFlick.contentY = Math.min(maxY, aboutFlick.contentY + aboutFlick.height)
+    else if (event.key === Qt.Key_PageUp) aboutFlick.contentY = Math.max(0, aboutFlick.contentY - aboutFlick.height)
+    else if (event.key === Qt.Key_Home) aboutFlick.contentY = 0
+    else if (event.key === Qt.Key_End) aboutFlick.contentY = maxY
+    else if (event.key === Qt.Key_L) root.showLicense = !root.showLicense
   }
 
   // Development aid: `omarchy-shell shell call ninepointlabs.barkeep renderTo
@@ -532,6 +593,7 @@ Item {
   }
 
   function setView(next) {
+    root.hideAbout()
     root.view = next
     root.naming = ""
     if (next === "profiles" && root.profileCursor < 0) root.selectProfile(Model.profileIndex(root.profiles, root.activeKey))
@@ -724,6 +786,16 @@ Item {
     var shift = (event.modifiers & Qt.ShiftModifier) !== 0
     var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
 
+    if (root.showAbout) {
+      root.handleAboutKey(event)
+      event.accepted = true
+      return
+    }
+    if (event.key === Qt.Key_F1 && !root.naming) {
+      root.showAboutPage()
+      event.accepted = true
+      return
+    }
     if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
       root.setView(root.view === "plugins" ? "profiles" : "plugins")
       event.accepted = true
@@ -804,6 +876,24 @@ Item {
     else if (ctrl && event.key === Qt.Key_N) root.startNaming("new")
     else if (ctrl && event.key === Qt.Key_D) root.startNaming("duplicate")
     else if (ctrl && event.key === Qt.Key_I) root.cycleIcon()
+  }
+
+  component AboutLabel: Text {
+    width: aboutFacts.labelWidth
+    textFormat: Text.PlainText
+    color: root.dim
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+    font.bold: true
+  }
+
+  component AboutValue: Text {
+    width: aboutFacts.valueWidth
+    textFormat: Text.PlainText
+    wrapMode: Text.Wrap
+    color: root.foreground
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.bodySmall
   }
 
   // ---------------------------------------------------------------- window
@@ -929,7 +1019,7 @@ Item {
 
             Text {
               textFormat: Text.PlainText
-              visible: root.view === "plugins"
+              visible: root.view === "plugins" && !root.showAbout
               text: root.filterText ? root.filterText + "▏" : "Type to filter…"
               color: root.filterText ? root.foreground : root.dim
               font.family: root.fontFamily
@@ -979,6 +1069,16 @@ Item {
               font.pixelSize: Style.font.bodySmall
               anchors.verticalCenter: parent.verticalCenter
             }
+
+            PanelActionButton {
+              objectName: "aboutButton"
+              iconText: "󰋽"
+              tooltipText: "About Barkeep (F1)"
+              foreground: root.showAbout ? root.selectedText : root.foreground
+              fontFamily: root.fontFamily
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: root.showAbout ? root.hideAbout() : root.showAboutPage()
+            }
           }
         }
 
@@ -987,6 +1087,7 @@ Item {
         // and "move it to the right section" means the row below.
         BorderSurface {
           id: stripSurface
+          visible: !root.showAbout
           width: parent.width
           height: stripColumn.implicitHeight + Style.spacing.md * 2
           radius: root.cornerRadius
@@ -1101,6 +1202,7 @@ Item {
 
         // ---------------------------------------------------------- body
         Item {
+          visible: !root.showAbout
           width: parent.width
           height: parent.height - root.headerHeight - stripSurface.height - footer.height - root.contentSpacing * 3
 
@@ -1700,6 +1802,164 @@ Item {
           }
         }
 
+        // --------------------------------------------------------- about
+        Item {
+          objectName: "aboutPage"
+          visible: root.showAbout
+          width: parent.width
+          height: parent.height - root.headerHeight - footer.height - root.contentSpacing * 2
+
+          Flickable {
+            id: aboutFlick
+            anchors.fill: parent
+            contentWidth: width
+            contentHeight: aboutColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            Column {
+              id: aboutColumn
+              width: Math.min(aboutFlick.width, Style.space(720))
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.spacing.lg
+
+              Row {
+                spacing: Style.spacing.lg
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "󰐱"
+                  color: root.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.iconLarge * 2
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Column {
+                  spacing: Style.spacing.xs
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: Model.ABOUT.name
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.heading
+                    font.bold: true
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    text: Model.ABOUT.tagline
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                  Text {
+                    objectName: "aboutVersion"
+                    textFormat: Text.PlainText
+                    text: "Version " + (root.version || "unknown")
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+
+              Rectangle { width: parent.width; height: Style.normalBorderWidth; color: root.faint }
+
+              Grid {
+                id: aboutFacts
+                width: parent.width
+                columns: 2
+                columnSpacing: Style.spacing.lg
+                rowSpacing: Style.spacing.md
+                readonly property real labelWidth: Style.space(96)
+                readonly property real valueWidth: width - labelWidth - columnSpacing
+
+                AboutLabel { text: "MADE BY" }
+                AboutValue { text: Model.ABOUT.organization }
+
+                AboutLabel { text: "CREATED" }
+                AboutValue { text: Model.ABOUT.created }
+
+                AboutLabel { text: "LICENSE" }
+                Column {
+                  width: aboutFacts.valueWidth
+                  spacing: Style.spacing.xs
+                  AboutValue { text: Model.ABOUT.license + ", " + Model.ABOUT.copyright }
+                  Button {
+                    objectName: "aboutLicenseButton"
+                    text: (root.showLicense ? "Hide license" : "Read license") + "  L"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.bodySmall
+                    onClicked: root.showLicense = !root.showLicense
+                  }
+                }
+
+                AboutLabel { text: "SUPPORT" }
+                Column {
+                  width: aboutFacts.valueWidth
+                  spacing: Style.spacing.xs
+                  AboutValue { text: Model.ABOUT.supportEmail }
+                  Flow {
+                    width: parent.width
+                    spacing: Style.spacing.md
+                    Button {
+                      text: "Email"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      onClicked: Qt.openUrlExternally(Model.supportMailto(root.version, root.aboutDetails))
+                    }
+                    Button {
+                      text: root.copiedLabel === "email" ? "Copied" : "Copy"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      onClicked: root.copyText(Model.ABOUT.supportEmail, "email")
+                    }
+                    Button {
+                      text: root.copiedLabel === "details" ? "Copied" : "Copy version details"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      onClicked: root.copyText(root.aboutDetails, "details")
+                    }
+                  }
+                }
+
+                AboutLabel { text: "PRIVACY" }
+                AboutValue { objectName: "aboutPrivacy"; text: Model.PRIVACY }
+
+                AboutLabel { text: "BUILT WITH" }
+                AboutValue { text: Model.builtWith(root.quickshellVersion, root.qtVersion) }
+              }
+
+              Text {
+                objectName: "aboutLicenseText"
+                visible: root.showLicense
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: licenseFile.loaded ? Model.reflowLicense(licenseFile.text())
+                  : Model.ABOUT.license + ", " + Model.ABOUT.copyright + ". LICENSE was not found in " + root.sourceDir + "."
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+        }
+
         // -------------------------------------------------------- footer
         Item {
           id: footer
@@ -1724,9 +1984,11 @@ Item {
             textFormat: Text.PlainText
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            text: root.view === "profiles"
-              ? "⇥ plugins   ↑↓ pick   ⏎ use   ^N new from bar   F2 rename   ^I icon   ^D duplicate   ⌦ delete"
-              : "⇥ profiles   ↑↓ pick   ⏎ on/off   ←→ nudge   ⇧↑↓ section   ^P pin   ^U update   ⌦ remove"
+            text: root.showAbout
+              ? "esc back   ↑↓ scroll   L license"
+              : root.view === "profiles"
+              ? "⇥ plugins   ↑↓ pick   ⏎ use   ^N new from bar   F2 rename   ^I icon   ^D duplicate   ⌦ delete   F1 about"
+              : "⇥ profiles   ↑↓ pick   ⏎ on/off   ←→ nudge   ⇧↑↓ section   ^P pin   ^U update   ⌦ remove   F1 about"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

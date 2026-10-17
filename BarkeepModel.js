@@ -498,3 +498,77 @@ function nextIcon(icon) {
   var at = PROFILE_ICONS.indexOf(icon)
   return PROFILE_ICONS[(at + 1) % PROFILE_ICONS.length]
 }
+
+// ---------------------------------------------------------------- about
+// The About page. The version is read from manifest.json and the license text
+// from LICENSE at run time; these are the facts that live nowhere else
+// (tests/about_test.sh checks them against the repo).
+
+var ABOUT = {
+  name: "Barkeep",
+  tagline: "Keyboard-driven overlay that tends your Omarchy bar",
+  organization: "Nine Point Labs",
+  supportEmail: "help@ninepointlabs.com",
+  created: "September 2026", // first commit: 2026-09-07
+  license: "MIT License",
+  copyright: "© 2026 Nine Point Labs" // as written in LICENSE
+}
+
+// Must stay true to what the plugin does. Network: only git, from
+// `barkeep-ops inspect` (git fetch) and `omarchy-plugin-update`. Files:
+// shell.json through the omarchy commands, and the profiles store.
+var PRIVACY = "No account, no sign-in and no telemetry; Barkeep itself talks to no server. "
+  + "The only network traffic is git, to each plugin's own origin remote (GitHub or wherever that "
+  + "plugin was cloned from). Checking for updates runs git fetch in every git-managed folder under "
+  + "~/.config/omarchy/plugins: when the overlay opens and the last check is over five minutes old, "
+  + "on Ctrl+R, and on barkeep check. Updating (Ctrl+U, or Ctrl+Shift+U for all) runs omarchy plugin "
+  + "update, which fetches and fast-forwards that plugin from the same remote. Removing a plugin and "
+  + "every layout change are local: the bar layout is saved by the omarchy bar and plugin commands "
+  + "in ~/.config/omarchy/shell.json, and bar profiles in ~/.config/omarchy/barkeep/profiles.json."
+
+// "0.2.0" from manifest.json's text, or "" if it cannot be read.
+function manifestVersion(text) {
+  var parsed
+  try { parsed = JSON.parse(String(text || "")) } catch (e) { return "" }
+  var version = parsed && typeof parsed.version === "string" ? parsed.version : ""
+  return /^[0-9A-Za-z.+-]{1,32}$/.test(version) ? version : ""
+}
+
+// Highest minor version `has(major, minor)` accepts, as "major.minor"
+// (Quickshell.hasVersion / hasQtVersion only answer yes or no), or "".
+function probedVersion(has, major) {
+  if (typeof has !== "function" || !has(major, 0)) return ""
+  var minor = 0
+  while (minor < 99 && has(major, minor + 1)) minor++
+  return major + "." + minor
+}
+
+// One paragraph per line, so the license wraps to the card's width.
+function reflowLicense(text) {
+  var paragraphs = String(text || "").replace(/\r/g, "").split(/\n\s*\n/)
+  var out = []
+  for (var i = 0; i < paragraphs.length; i++) {
+    var p = paragraphs[i].replace(/\s+/g, " ").trim()
+    if (p !== "") out.push(p)
+  }
+  return out.join("\n\n")
+}
+
+function builtWith(quickshell, qt) {
+  var built = []
+  if (quickshell) built.push("Quickshell " + quickshell)
+  if (qt) built.push("Qt " + qt)
+  return built.length > 0 ? built.join(", ") : "Quickshell and Qt"
+}
+
+// Version details for a support email.
+function aboutDetails(version, quickshell, qt, desktop) {
+  return ABOUT.name + " " + (version || "unknown version") + "\n"
+    + builtWith(quickshell, qt) + "\n"
+    + (desktop || "unknown desktop")
+}
+
+function supportMailto(version, details) {
+  return "mailto:" + ABOUT.supportEmail + "?subject=" + encodeURIComponent(ABOUT.name + " " + (version || ""))
+    + "&body=" + encodeURIComponent("\n\n--\n" + details)
+}

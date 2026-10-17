@@ -251,7 +251,7 @@ trap cleanup EXIT
 STAGE="$(mktemp -d "$PLUGINS_DIR/.barkeep-stage.XXXXXX")"
 chmod 755 "$STAGE"
 rsync -a \
-  --exclude '.git' --exclude 'install.sh' --exclude 'tests' --exclude '*.md' --exclude 'LICENSE' --exclude 'preview.png' \
+  --exclude '.git' --exclude 'install.sh' --exclude 'tests' --exclude '*.md' --exclude 'preview.png' \
   "$HERE/" "$STAGE/"
 # The staged copy is not reachable under its final name yet, so this cannot
 # mark anything outside it executable.
