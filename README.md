@@ -239,6 +239,7 @@ barkeep about                   open the overlay on the About page
 barkeep status                  open / closed
 barkeep check                   JSON git state for every plugin folder
 barkeep chip on|off             put the profile switcher on the bar, or take it off
+barkeep --version
 
 barkeep profile list            * marks the profile in use
 barkeep profile use <profile>   by key or by name
@@ -252,7 +253,9 @@ barkeep profile status          the whole store, as JSON
 ```
 
 The `barkeep profile` commands work on files and do not need the overlay
-open.
+open. Profile names are unique, ignoring case: saving, duplicating or renaming
+onto a name already in use is refused. `barkeep check`, `--help` and
+`--version` also work while the shell is not running.
 
 ## How it works
 
@@ -366,6 +369,14 @@ the refusals.
 
 ```bash
 tests/profiles_test.sh
+```
+
+`tests/launcher_test.sh` runs `bin/barkeep` with the shell down: help,
+`--version`, unknown commands and `check` still answer, and the overlay
+commands say the shell is not running.
+
+```bash
+tests/launcher_test.sh
 ```
 
 `tests/about_test.sh` checks the About page's facts against `manifest.json`,

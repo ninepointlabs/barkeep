@@ -113,10 +113,9 @@ check "$CONFIG" '.idle.lock == 300' "shell.json is not rewritten by a read"
 note "save as"
 expect_ok "save the current bar as Video" save Video
 check "$STORE" '.active == "video" and (.profiles | map(.key)) == ["default", "video"]' "Video is saved and in use"
-expect_ok "a second Video gets its own key, not an error" save Video
-check "$STORE" '(.profiles | map(.key)) == ["default", "video", "video-2"]' "duplicate names get a numbered key"
-expect_ok "switch away from the copy" use video
-expect_ok "delete video-2" delete video-2
+expect_fail "a second Video is refused" "already a profile called" save video
+check "$STORE" '(.profiles | map(.key)) == ["default", "video"]' "the store is unchanged"
+if [[ $(stat -c '%a' "$H/.config/omarchy/barkeep/.lock") == 600 ]]; then ok "the lock file is private to you"; else bad "the lock file is private to you"; fi
 
 note "arranging the live bar, then switching"
 # Rearrange the live bar the way the user would while in Video: mail off, a
@@ -173,8 +172,11 @@ expect_ok "set an icon" icon video $'\xf3\xb0\xbf\x8e'
 check "$STORE" '(.profiles[] | select(.key == "video") | .icon | explode) == [987086]' "the icon is stored"
 expect_fail "a long icon is refused" "one to four characters" icon video "not an icon"
 expect_fail "an empty name is refused" "needs a name" rename video "   "
+expect_fail "renaming onto another profile's name is refused" "already a profile called" rename video default
+expect_ok "a profile can be renamed to its own name in another case" rename video "VIDEO EDITING"
 expect_ok "duplicate" duplicate video "Gaming"
 check "$STORE" '(.profiles | map(.key)) == ["default", "video", "gaming"] and (.profiles[2].layout == .profiles[1].layout)' "the copy has the same layout"
+expect_fail "a duplicate cannot take an existing name" "already a profile called" duplicate video "gaming"
 expect_ok "duplicating the profile in use copies the live bar" duplicate default "Work"
 check "$STORE" '(.profiles[] | select(.key == "work") | [.layout.right[].id]) == ["ninepointlabs.barkeep", "acme.mail", "omarchy.audio"]' "Work matches the live bar"
 expect_fail "the profile in use cannot be deleted" "switch to another one first" delete default

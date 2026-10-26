@@ -173,6 +173,7 @@ lock_store() {
   local lock="$STORE_DIR/.lock"
   [[ ! -L $lock ]] || fail "$lock is a symlink"
   exec 9>>"$lock" || fail "could not open $lock"
+  chmod 600 -- "$lock" 2>/dev/null || true
   flock -w 10 9 || fail "another profile change is still running"
 }
 
@@ -244,6 +245,14 @@ valid_name() {
   printf '%s\n' "$name"
 }
 
+# Names must be unique (ignoring case), or looking a profile up by name would
+# be ambiguous. $2 is the key of a profile allowed to have it (rename).
+name_free() {
+  jq -e --arg n "$1" --arg k "${2:-}" \
+    'all(.profiles[]; .key == $k or (.name | ascii_downcase) != ($n | ascii_downcase))' "$STORE" >/dev/null ||
+    fail "there is already a profile called '$1'"
+}
+
 valid_icon() {
   jq -en --arg g "$1" '$g | length >= 1 and length <= 4 and (test("[\\s[:cntrl:]]") | not)' >/dev/null ||
     fail "an icon is one to four characters, such as a Nerd Font glyph"
@@ -305,6 +314,7 @@ cmd_step() {
 cmd_save() {
   local name icon="$DEFAULT_ICON"
   name=$(valid_name "${1:-}") || exit 1
+  name_free "$name"
   shift
   while (( $# > 0 )); do
     case "$1" in
@@ -333,6 +343,7 @@ cmd_duplicate() {
   local key name
   key=$(resolve "${1:-}") || exit 1
   name=$(valid_name "${2:-}") || exit 1
+  name_free "$name"
   load_catalog
   # The profile in use is whatever the live bar shows, so copy that.
   jq "$DEFS"'
@@ -349,6 +360,7 @@ cmd_rename() {
   local key name
   key=$(resolve "${1:-}") || exit 1
   name=$(valid_name "${2:-}") || exit 1
+  name_free "$name" "$key"
   jq --arg k "$key" --arg n "$name" '.profiles |= map(if .key == $k then .name = $n else . end)' \
     "$STORE" >"$WORK/new.json" || fail "could not rename the profile"
   write_store "$WORK/new.json"
